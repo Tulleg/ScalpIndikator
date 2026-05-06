@@ -116,54 +116,44 @@ longCondition  = bullMomentum and htfBull and bullPattern and noPosition
 shortCondition = bearMomentum and htfBear and bearPattern and noPosition
 
 // ═══════════════════════════════════════════════════════════════════
-//  SL / TP BOX MANAGEMENT
+//  SL / TP BOX STATE  (var — persists across bars)
 // ═══════════════════════════════════════════════════════════════════
-var box slBox = na
-var box tpBox = na
+var box  slBox     = na
+var box  tpBox     = na
 var line entryLine = na
 
-deleteZone() =>
+// ═══════════════════════════════════════════════════════════════════
+//  TRADE EXECUTION + INLINE BOX DRAW
+//  (global var objects cannot be assigned inside functions in PS6)
+// ═══════════════════════════════════════════════════════════════════
+
+// Delete old zone when position closes
+positionClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+if positionClosed
     box.delete(slBox)
     box.delete(tpBox)
     line.delete(entryLine)
 
-drawZone(entryPrice, slPrice, tpPrice, isLong) =>
-    deleteZone()
-    slCol  = color.new(color.red,   75)
-    tpCol  = color.new(color.green, 75)
-    // SL box: entry → stop
-    slBox    := box.new(bar_index, entryPrice, bar_index + 1, slPrice,
-                        extend        = extend.right,
-                        border_color  = color.new(color.red, 20),
-                        border_width  = 1,
-                        bgcolor       = slCol)
-    // TP box: entry → target
-    tpBox    := box.new(bar_index, entryPrice, bar_index + 1, tpPrice,
-                        extend        = extend.right,
-                        border_color  = color.new(color.green, 20),
-                        border_width  = 1,
-                        bgcolor       = tpCol)
-    // Entry line
-    entryLine := line.new(bar_index, entryPrice, bar_index + 1, entryPrice,
-                          extend     = extend.right,
-                          color      = color.new(color.white, 30),
-                          width      = 1,
-                          style      = line.style_dashed)
-
-// Close zone when position is exited
-positionClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
-if positionClosed
-    deleteZone()
-
-// ═══════════════════════════════════════════════════════════════════
-//  TRADE EXECUTION
-// ═══════════════════════════════════════════════════════════════════
 if longCondition
     slDist  = (close - low)  * (1.0 + slBuffer / 100.0)
     slPrice = close - slDist
     tpPrice = close + slDist * rrRatio
     if showBoxes
-        drawZone(close, slPrice, tpPrice, true)
+        box.delete(slBox)
+        box.delete(tpBox)
+        line.delete(entryLine)
+        slBox     := box.new(bar_index, close, bar_index + 1, slPrice,
+                             extend=extend.right,
+                             border_color=color.new(color.red,   20), border_width=1,
+                             bgcolor     =color.new(color.red,   75))
+        tpBox     := box.new(bar_index, close, bar_index + 1, tpPrice,
+                             extend=extend.right,
+                             border_color=color.new(color.green, 20), border_width=1,
+                             bgcolor     =color.new(color.green, 75))
+        entryLine := line.new(bar_index, close, bar_index + 1, close,
+                              extend=extend.right,
+                              color =color.new(color.white, 30), width=1,
+                              style =line.style_dashed)
     strategy.entry("Long", strategy.long)
     strategy.exit("Long Exit", from_entry="Long", stop=slPrice, limit=tpPrice)
 
@@ -172,7 +162,21 @@ if shortCondition
     slPrice = close + slDist
     tpPrice = close - slDist * rrRatio
     if showBoxes
-        drawZone(close, slPrice, tpPrice, false)
+        box.delete(slBox)
+        box.delete(tpBox)
+        line.delete(entryLine)
+        slBox     := box.new(bar_index, close, bar_index + 1, slPrice,
+                             extend=extend.right,
+                             border_color=color.new(color.red,   20), border_width=1,
+                             bgcolor     =color.new(color.red,   75))
+        tpBox     := box.new(bar_index, close, bar_index + 1, tpPrice,
+                             extend=extend.right,
+                             border_color=color.new(color.green, 20), border_width=1,
+                             bgcolor     =color.new(color.green, 75))
+        entryLine := line.new(bar_index, close, bar_index + 1, close,
+                              extend=extend.right,
+                              color =color.new(color.white, 30), width=1,
+                              style =line.style_dashed)
     strategy.entry("Short", strategy.short)
     strategy.exit("Short Exit", from_entry="Short", stop=slPrice, limit=tpPrice)
 
