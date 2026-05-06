@@ -1,14 +1,14 @@
 //@version=6
 strategy(
-     title                  = "EMA Scalping Strategy 7/17 [Trader DNA]",
-     shorttitle             = "EMA Scalp 7/17",
-     overlay                = true,
-     process_orders_on_close = true,   // execute at signal-bar close, not next open
-     default_qty_type       = strategy.percent_of_equity,
-     default_qty_value      = 1,
-     commission_type        = strategy.commission.percent,
-     commission_value       = 0.05,
-     slippage               = 1
+     title                   = "EMA Scalping Strategy 7/17 [Optimized]",
+     shorttitle              = "EMA Scalp 7/17 Pro",
+     overlay                 = true,
+     process_orders_on_close  = true,
+     default_qty_type        = strategy.percent_of_equity,
+     default_qty_value       = 1,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.05,
+     slippage                = 1
  )
 
 // ═══════════════════════════════════════════════════════════════════
@@ -18,57 +18,112 @@ grpEma = "EMA Settings"
 emaFastLen = input.int(7,  "Fast EMA", minval=1, group=grpEma)
 emaSlowLen = input.int(17, "Slow EMA", minval=1, group=grpEma)
 
-grpMom = "Momentum Filter"
-slopeThresh = input.float(0.0001, "Min Slope Threshold (fraction of price)",
-              minval=0.0, step=0.00005, group=grpMom,
-              tooltip="EMA7 change per bar ÷ price. Lower = more signals, Higher = stricter.")
+grpMom = "Momentum / ADX Filter"
+adxLen      = input.int(14,   "ADX Length",              minval=1,  group=grpMom)
+adxThresh   = input.float(20, "Min ADX (Trend Strength)", minval=0, step=1, group=grpMom,
+              tooltip="ADX ≥ 20 = trending market. Below 20 = choppy — no trades taken.")
+slopeThresh = input.float(0.0001, "Min EMA7 Slope (fraction of price)",
+              minval=0.0, step=0.00005, group=grpMom)
+
+grpCross = "Crossover Recency"
+crossRecency = input.int(8, "Max bars since EMA cross", minval=1, maxval=50, group=grpCross,
+               tooltip="Only enter if EMA7 crossed EMA17 within the last N bars. Prevents late entries at trend exhaustion.")
+
+grpRsi = "RSI Filter"
+rsiLen = input.int(14,   "RSI Length",                         minval=1,  group=grpRsi)
+rsiOB  = input.float(65, "Overbought ceiling (no Longs above)", minval=50, maxval=90, step=1, group=grpRsi)
+rsiOS  = input.float(35, "Oversold floor (no Shorts below)",    minval=10, maxval=50, step=1, group=grpRsi)
 
 grpPat = "Candlestick Patterns"
-pinBarWickRatio = input.float(0.55, "Pin Bar – Min Wick/Range",
-                 minval=0.1, maxval=0.95, step=0.05, group=grpPat)
-bigCandleRatio  = input.float(0.60, "Big Candle – Min Body/Range",
-                 minval=0.1, maxval=0.99, step=0.05, group=grpPat)
-engulfRatio     = input.float(1.00, "Engulfing – Body vs Prev Body (×)",
-                 minval=0.5, step=0.05, group=grpPat)
+pinBarWickRatio = input.float(0.55, "Pin Bar – Min Wick/Range",     minval=0.1, maxval=0.95, step=0.05, group=grpPat)
+bigCandleRatio  = input.float(0.60, "Big Candle – Min Body/Range",  minval=0.1, maxval=0.99, step=0.05, group=grpPat)
+engulfRatio     = input.float(1.00, "Engulfing – Body vs Prev (×)", minval=0.5, step=0.05, group=grpPat)
 
 grpRisk = "Risk Management"
-rrRatio  = input.float(3.0, "Risk:Reward Ratio", minval=0.5, step=0.5, group=grpRisk)
-slBuffer = input.float(5.0, "SL Buffer (% of SL distance)", minval=0.0, step=1.0, group=grpRisk,
-           tooltip="Adds extra room to the stop-loss so minor wicks don't stop you out.")
+atrLen    = input.int(14,   "ATR Length",          minval=1,  group=grpRisk)
+atrSlMult = input.float(1.5, "SL = ATR ×",         minval=0.1, step=0.1, group=grpRisk,
+            tooltip="Stop-Loss = entry ± (ATR × multiplier). ATR-based SL adapts to volatility — less premature stops than candle-based SL.")
+rrRatio   = input.float(2.0, "Risk:Reward Ratio",  minval=0.5, step=0.5, group=grpRisk,
+            tooltip="1:2 is more realistic for scalping than 1:3, resulting in a higher win rate.")
+useTrail  = input.bool(false, "Use Trailing Stop",              group=grpRisk,
+            tooltip="Trails the stop behind price by ATR × multiplier to lock in profits.")
+trailMult = input.float(1.0, "Trail Stop = ATR ×", minval=0.1, step=0.1, group=grpRisk)
 
 grpHTF = "Higher Timeframe Filter"
 htfRes = input.timeframe("60", "HTF (trend confirmation)", group=grpHTF,
-         tooltip="Only trade when current TF and this TF agree on direction.")
+         tooltip="Only trade in the direction of the trend on this timeframe.")
+
+grpSession = "Session Filter"
+useSession = input.bool(false, "Limit to Active Sessions", group=grpSession,
+             tooltip="Avoids low-liquidity periods with more false signals.")
+sessionStr = input.string("0700-1600", "Session Window (UTC)",  group=grpSession,
+             tooltip="Default 07:00–16:00 UTC covers London open + NY overlap.")
 
 grpVis = "Visuals"
-showBoxes    = input.bool(true,  "Show SL / TP Boxes",       group=grpVis)
-showBg       = input.bool(true,  "Show Momentum Background",  group=grpVis)
-showHTFCloud = input.bool(true,  "Show HTF EMA Cloud",        group=grpVis)
+showBoxes    = input.bool(true,  "Show SL / TP Boxes",      group=grpVis)
+showBg       = input.bool(true,  "Show Momentum Background", group=grpVis)
+showHTFCloud = input.bool(true,  "Show HTF EMA Cloud",       group=grpVis)
 
 // ═══════════════════════════════════════════════════════════════════
-//  EMA + MOMENTUM
+//  EMA + SLOPE
 // ═══════════════════════════════════════════════════════════════════
 emaFast = ta.ema(close, emaFastLen)
 emaSlow = ta.ema(close, emaSlowLen)
 
-// Slope over 1 bar (most responsive) — normalized to price level
-emaFastSlope = (emaFast - emaFast[1]) / close
-
 bullTrend    = emaFast > emaSlow
 bearTrend    = emaFast < emaSlow
+
+emaFastSlope = (emaFast - emaFast[1]) / close
 bullMomentum = bullTrend and emaFastSlope >  slopeThresh
 bearMomentum = bearTrend and emaFastSlope < -slopeThresh
 hasMomentum  = bullMomentum or bearMomentum
 
 // ═══════════════════════════════════════════════════════════════════
+//  CROSSOVER RECENCY  — avoid entering a trend that's already old
+// ═══════════════════════════════════════════════════════════════════
+bullCross = ta.crossover(emaFast,  emaSlow)
+bearCross = ta.crossunder(emaFast, emaSlow)
+
+var int barsSinceBull = 999
+var int barsSinceBear = 999
+barsSinceBull := bullCross ? 0 : barsSinceBull + 1
+barsSinceBear := bearCross ? 0 : barsSinceBear + 1
+
+recentBullCross = barsSinceBull <= crossRecency
+recentBearCross = barsSinceBear <= crossRecency
+
+// ═══════════════════════════════════════════════════════════════════
+//  ADX — trend strength (filters choppy / sideways markets)
+// ═══════════════════════════════════════════════════════════════════
+[_diPlus, _diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+trendStrong = adxVal >= adxThresh
+
+// ═══════════════════════════════════════════════════════════════════
+//  RSI — avoid overbought longs and oversold shorts
+// ═══════════════════════════════════════════════════════════════════
+rsiVal    = ta.rsi(close, rsiLen)
+rsiBullOk = rsiVal < rsiOB
+rsiBearOk = rsiVal > rsiOS
+
+// ═══════════════════════════════════════════════════════════════════
+//  ATR — adaptive stop-loss sizing
+// ═══════════════════════════════════════════════════════════════════
+atr14 = ta.atr(atrLen)
+
+// ═══════════════════════════════════════════════════════════════════
 //  HIGHER TIMEFRAME FILTER
 // ═══════════════════════════════════════════════════════════════════
-htfEmaFast = request.security(syminfo.tickerid, htfRes, ta.ema(close, emaFastLen),
-              lookahead=barmerge.lookahead_off)
-htfEmaSlow = request.security(syminfo.tickerid, htfRes, ta.ema(close, emaSlowLen),
-              lookahead=barmerge.lookahead_off)
+htfEmaFast = request.security(syminfo.tickerid, htfRes,
+              ta.ema(close, emaFastLen), lookahead=barmerge.lookahead_off)
+htfEmaSlow = request.security(syminfo.tickerid, htfRes,
+              ta.ema(close, emaSlowLen), lookahead=barmerge.lookahead_off)
 htfBull = htfEmaFast > htfEmaSlow
 htfBear = htfEmaFast < htfEmaSlow
+
+// ═══════════════════════════════════════════════════════════════════
+//  SESSION FILTER
+// ═══════════════════════════════════════════════════════════════════
+inSession = useSession ? not na(time(timeframe.period, sessionStr, "UTC")) : true
 
 // ═══════════════════════════════════════════════════════════════════
 //  CANDLESTICK PATTERNS
@@ -87,7 +142,6 @@ validBody   = prevBody    > 0
 bullPinBar = validRange
              and lowerWick >= pinBarWickRatio * candleRange
              and upperWick  < (1.0 - pinBarWickRatio) * candleRange
-
 bearPinBar = validRange
              and upperWick  >= pinBarWickRatio * candleRange
              and lowerWick   < (1.0 - pinBarWickRatio) * candleRange
@@ -100,7 +154,6 @@ bearBigCandle = validRange and bearCandle and (candleBody / candleRange) >= bigC
 bullEngulf = validBody and bullCandle and not bullCandle[1]
              and (candleBody / prevBody) >= engulfRatio
              and close >= open[1] and open <= close[1]
-
 bearEngulf = validBody and bearCandle and not bearCandle[1]
              and (candleBody / prevBody) >= engulfRatio
              and close <= open[1] and open >= close[1]
@@ -109,76 +162,97 @@ bullPattern = bullPinBar or bullBigCandle or bullEngulf
 bearPattern = bearPinBar or bearBigCandle or bearEngulf
 
 // ═══════════════════════════════════════════════════════════════════
-//  ENTRY CONDITIONS
+//  ENTRY CONDITIONS  — all 6 filters must pass
 // ═══════════════════════════════════════════════════════════════════
 noPosition     = strategy.position_size == 0
-longCondition  = bullMomentum and htfBull and bullPattern and noPosition
-shortCondition = bearMomentum and htfBear and bearPattern and noPosition
+longCondition  = bullMomentum and recentBullCross and trendStrong
+                 and htfBull and rsiBullOk and bullPattern and inSession and noPosition
+shortCondition = bearMomentum and recentBearCross and trendStrong
+                 and htfBear and rsiBearOk and bearPattern and inSession and noPosition
 
 // ═══════════════════════════════════════════════════════════════════
-//  SL / TP BOX STATE  (var — persists across bars)
+//  TRADE STATE  (persists across bars)
 // ═══════════════════════════════════════════════════════════════════
-var box  slBox     = na
-var box  tpBox     = na
-var line entryLine = na
+var float activeSL  = na
+var float activeTP  = na
+var box   slBox     = na
+var box   tpBox     = na
+var line  entryLine = na
 
 // ═══════════════════════════════════════════════════════════════════
-//  TRADE EXECUTION + INLINE BOX DRAW
-//  (global var objects cannot be assigned inside functions in PS6)
+//  TRAILING STOP UPDATE  (runs every bar while in position)
+//  Calls strategy.exit each bar to move the stop — overrides the
+//  initial exit placed at entry, which is correct behaviour.
 // ═══════════════════════════════════════════════════════════════════
+if strategy.position_size > 0
+    if useTrail
+        newTS    = close - trailMult * atr14
+        activeSL := math.max(nz(activeSL, newTS), newTS)
+    strategy.exit("Long Exit", "Long", stop=activeSL, limit=activeTP)
 
-// Delete old zone when position closes
+if strategy.position_size < 0
+    if useTrail
+        newTS    = close + trailMult * atr14
+        activeSL := math.min(nz(activeSL, newTS), newTS)
+    strategy.exit("Short Exit", "Short", stop=activeSL, limit=activeTP)
+
+// ─── Cleanup when position is closed ────────────────────────────────────────
 positionClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
 if positionClosed
+    activeSL := na
+    activeTP := na
     box.delete(slBox)
     box.delete(tpBox)
     line.delete(entryLine)
 
+// ═══════════════════════════════════════════════════════════════════
+//  ENTRIES  + BOX DRAW
+// ═══════════════════════════════════════════════════════════════════
 if longCondition
-    slDist  = (close - low)  * (1.0 + slBuffer / 100.0)
-    slPrice = close - slDist
-    tpPrice = close + slDist * rrRatio
+    slDist   = atr14 * atrSlMult
+    activeSL := close - slDist
+    activeTP := close + slDist * rrRatio
     if showBoxes
         box.delete(slBox)
         box.delete(tpBox)
         line.delete(entryLine)
-        slBox     := box.new(bar_index, close, bar_index + 1, slPrice,
+        slBox     := box.new(bar_index, close, bar_index + 1, activeSL,
                              extend=extend.right,
                              border_color=color.new(color.red,   20), border_width=1,
-                             bgcolor     =color.new(color.red,   75))
-        tpBox     := box.new(bar_index, close, bar_index + 1, tpPrice,
+                             bgcolor     =color.new(color.red,   82))
+        tpBox     := box.new(bar_index, close, bar_index + 1, activeTP,
                              extend=extend.right,
                              border_color=color.new(color.green, 20), border_width=1,
-                             bgcolor     =color.new(color.green, 75))
+                             bgcolor     =color.new(color.green, 82))
         entryLine := line.new(bar_index, close, bar_index + 1, close,
                               extend=extend.right,
                               color =color.new(color.white, 30), width=1,
                               style =line.style_dashed)
     strategy.entry("Long", strategy.long)
-    strategy.exit("Long Exit", from_entry="Long", stop=slPrice, limit=tpPrice)
+    strategy.exit("Long Exit", "Long", stop=activeSL, limit=activeTP)
 
 if shortCondition
-    slDist  = (high - close) * (1.0 + slBuffer / 100.0)
-    slPrice = close + slDist
-    tpPrice = close - slDist * rrRatio
+    slDist   = atr14 * atrSlMult
+    activeSL := close + slDist
+    activeTP := close - slDist * rrRatio
     if showBoxes
         box.delete(slBox)
         box.delete(tpBox)
         line.delete(entryLine)
-        slBox     := box.new(bar_index, close, bar_index + 1, slPrice,
+        slBox     := box.new(bar_index, close, bar_index + 1, activeSL,
                              extend=extend.right,
                              border_color=color.new(color.red,   20), border_width=1,
-                             bgcolor     =color.new(color.red,   75))
-        tpBox     := box.new(bar_index, close, bar_index + 1, tpPrice,
+                             bgcolor     =color.new(color.red,   82))
+        tpBox     := box.new(bar_index, close, bar_index + 1, activeTP,
                              extend=extend.right,
                              border_color=color.new(color.green, 20), border_width=1,
-                             bgcolor     =color.new(color.green, 75))
+                             bgcolor     =color.new(color.green, 82))
         entryLine := line.new(bar_index, close, bar_index + 1, close,
                               extend=extend.right,
                               color =color.new(color.white, 30), width=1,
                               style =line.style_dashed)
     strategy.entry("Short", strategy.short)
-    strategy.exit("Short Exit", from_entry="Short", stop=slPrice, limit=tpPrice)
+    strategy.exit("Short Exit", "Short", stop=activeSL, limit=activeTP)
 
 // ═══════════════════════════════════════════════════════════════════
 //  VISUALS
@@ -197,7 +271,7 @@ fill(p1, p2,
      color = htfBull ? color.new(color.green, 88) : color.new(color.red, 88),
      title = "HTF Cloud")
 
-// Momentum background (only when EMAs slope strongly)
+// Momentum background
 bgcolor(showBg and hasMomentum
         ? (bullMomentum ? color.new(color.green, 93) : color.new(color.red, 93))
         : na,
@@ -209,7 +283,7 @@ plotshape(longCondition,  "Long",  shape.triangleup,
 plotshape(shortCondition, "Short", shape.triangledown,
           location.abovebar, color=color.new(color.red,  0), size=size.normal)
 
-// Pattern labels
+// Pattern labels  (function only creates objects, does not modify global vars — CE10088 safe)
 patternLabel(cond, txt, yLoc, col) =>
     if cond
         label.new(bar_index, yLoc, txt,
@@ -226,38 +300,56 @@ patternLabel(shortCondition and bearBigCandle, "MOM", high + candleRange * 0.6, 
 patternLabel(shortCondition and bearEngulf,    "ENG", high + candleRange * 0.6, color.purple)
 
 // ═══════════════════════════════════════════════════════════════════
-//  INFO TABLE
+//  INFO TABLE  — shows live filter state for each condition
 // ═══════════════════════════════════════════════════════════════════
-var table infoTable = table.new(position.top_right, 2, 6,
+var table infoTable = table.new(position.top_right, 2, 10,
      bgcolor=color.new(color.black, 55), border_color=color.gray, border_width=1)
 
 if barstate.islast
-    trendTxt = bullTrend   ? "▲ BULL"      : "▼ BEAR"
-    trendCol = bullTrend   ? color.lime     : color.red
-    htfTxt   = htfBull     ? "▲ BULL"      : "▼ BEAR"
-    htfCol   = htfBull     ? color.lime     : color.red
-    momTxt   = hasMomentum ? "✔ ACTIVE"    : "✘ FLAT"
-    momCol   = hasMomentum ? color.lime     : color.gray
+    trendTxt = bullTrend    ? "▲ BULL"    : "▼ BEAR"
+    trendCol = bullTrend    ? color.lime   : color.red
+    htfTxt   = htfBull      ? "▲ BULL"    : "▼ BEAR"
+    htfCol   = htfBull      ? color.lime   : color.red
+    momTxt   = hasMomentum  ? "✔ ACTIVE"  : "✘ FLAT"
+    momCol   = hasMomentum  ? color.lime   : color.gray
+    adxRound = math.round(adxVal, 1)
+    adxTxt   = trendStrong  ? "✔ " + str.tostring(adxRound) : "✘ " + str.tostring(adxRound)
+    adxCol   = trendStrong  ? color.lime   : color.orange
+    rsiRound = math.round(rsiVal, 1)
+    rsiTxt   = str.tostring(rsiRound)
+    rsiCol   = (rsiVal > rsiOB or rsiVal < rsiOS) ? color.red : color.lime
+    crossBars = bullTrend ? barsSinceBull : barsSinceBear
+    crossTxt = crossBars <= crossRecency
+               ? "✔ " + str.tostring(crossBars) + " bars ago"
+               : "✘ " + str.tostring(crossBars) + " bars ago"
+    crossCol = crossBars <= crossRecency ? color.lime : color.orange
+    sessTxt  = inSession    ? "✔ OPEN"    : "✘ CLOSED"
+    sessCol  = inSession    ? color.lime   : color.gray
     aligned  = bullTrend == htfBull
-    algnTxt  = aligned     ? "✔ ALIGNED"   : "✘ DIVERGING"
-    algnCol  = aligned     ? color.lime     : color.orange
+    algnTxt  = aligned      ? "✔ ALIGNED" : "✘ DIVERGING"
+    algnCol  = aligned      ? color.lime   : color.orange
 
-    table.cell(infoTable, 0, 0, "EMA Scalping 7/17",
+    table.cell(infoTable, 0, 0, "EMA Scalp 7/17 Pro",
                text_color=color.white, bgcolor=color.new(color.navy, 35), text_size=size.small)
-    table.cell(infoTable, 1, 0, "", bgcolor=color.new(color.navy, 35))
+    table.cell(infoTable, 1, 0, "",
+               text_color=color.white, bgcolor=color.new(color.navy, 35))
 
-    table.cell(infoTable, 0, 1, "Trend (LTF)", text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 1, trendTxt,      text_color=trendCol,     text_size=size.tiny)
-
-    table.cell(infoTable, 0, 2, "HTF Trend",   text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 2, htfTxt,        text_color=htfCol,       text_size=size.tiny)
-
-    table.cell(infoTable, 0, 3, "Momentum",    text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 3, momTxt,        text_color=momCol,       text_size=size.tiny)
-
-    table.cell(infoTable, 0, 4, "Alignment",   text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 4, algnTxt,       text_color=algnCol,      text_size=size.tiny)
-
-    table.cell(infoTable, 0, 5, "RR Ratio",    text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 5, "1:" + str.tostring(rrRatio),
+    table.cell(infoTable, 0, 1, "LTF Trend",  text_color=color.silver, text_size=size.tiny)
+    table.cell(infoTable, 1, 1, trendTxt,     text_color=trendCol,     text_size=size.tiny)
+    table.cell(infoTable, 0, 2, "HTF Trend",  text_color=color.silver, text_size=size.tiny)
+    table.cell(infoTable, 1, 2, htfTxt,       text_color=htfCol,       text_size=size.tiny)
+    table.cell(infoTable, 0, 3, "Alignment",  text_color=color.silver, text_size=size.tiny)
+    table.cell(infoTable, 1, 3, algnTxt,      text_color=algnCol,      text_size=size.tiny)
+    table.cell(infoTable, 0, 4, "Momentum",   text_color=color.silver, text_size=size.tiny)
+    table.cell(infoTable, 1, 4, momTxt,       text_color=momCol,       text_size=size.tiny)
+    table.cell(infoTable, 0, 5, "ADX",        text_color=color.silver, text_size=size.tiny)
+    table.cell(infoTable, 1, 5, adxTxt,       text_color=adxCol,       text_size=size.tiny)
+    table.cell(infoTable, 0, 6, "RSI",        text_color=color.silver, text_size=size.tiny)
+    table.cell(infoTable, 1, 6, rsiTxt,       text_color=rsiCol,       text_size=size.tiny)
+    table.cell(infoTable, 0, 7, "EMA Cross",  text_color=color.silver, text_size=size.tiny)
+    table.cell(infoTable, 1, 7, crossTxt,     text_color=crossCol,     text_size=size.tiny)
+    table.cell(infoTable, 0, 8, "Session",    text_color=color.silver, text_size=size.tiny)
+    table.cell(infoTable, 1, 8, sessTxt,      text_color=sessCol,      text_size=size.tiny)
+    table.cell(infoTable, 0, 9, "RR Ratio",   text_color=color.silver, text_size=size.tiny)
+    table.cell(infoTable, 1, 9, "1:" + str.tostring(rrRatio),
                text_color=color.yellow, text_size=size.tiny)
