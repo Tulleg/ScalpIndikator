@@ -300,56 +300,56 @@ patternLabel(shortCondition and bearBigCandle, "MOM", high + candleRange * 0.6, 
 patternLabel(shortCondition and bearEngulf,    "ENG", high + candleRange * 0.6, color.purple)
 
 // ═══════════════════════════════════════════════════════════════════
-//  INFO TABLE  — shows live filter state for each condition
+//  INFO TABLE  — updated every bar (barstate.islast unreliable in
+//  strategies with process_orders_on_close = true)
 // ═══════════════════════════════════════════════════════════════════
 var table infoTable = table.new(position.top_right, 2, 10,
-     bgcolor=color.new(color.black, 55), border_color=color.gray, border_width=1)
+     bgcolor=color.new(color.black, 20), border_color=color.new(color.gray, 30), border_width=1)
 
-if barstate.islast
-    trendTxt = bullTrend    ? "▲ BULL"    : "▼ BEAR"
-    trendCol = bullTrend    ? color.lime   : color.red
-    htfTxt   = htfBull      ? "▲ BULL"    : "▼ BEAR"
-    htfCol   = htfBull      ? color.lime   : color.red
-    momTxt   = hasMomentum  ? "✔ ACTIVE"  : "✘ FLAT"
-    momCol   = hasMomentum  ? color.lime   : color.gray
-    adxRound = math.round(adxVal, 1)
-    adxTxt   = trendStrong  ? "✔ " + str.tostring(adxRound) : "✘ " + str.tostring(adxRound)
-    adxCol   = trendStrong  ? color.lime   : color.orange
-    rsiRound = math.round(rsiVal, 1)
-    rsiTxt   = str.tostring(rsiRound)
-    rsiCol   = (rsiVal > rsiOB or rsiVal < rsiOS) ? color.red : color.lime
-    crossBars = bullTrend ? barsSinceBull : barsSinceBear
-    crossTxt = crossBars <= crossRecency
-               ? "✔ " + str.tostring(crossBars) + " bars ago"
-               : "✘ " + str.tostring(crossBars) + " bars ago"
-    crossCol = crossBars <= crossRecency ? color.lime : color.orange
-    sessTxt  = inSession    ? "✔ OPEN"    : "✘ CLOSED"
-    sessCol  = inSession    ? color.lime   : color.gray
-    aligned  = bullTrend == htfBull
-    algnTxt  = aligned      ? "✔ ALIGNED" : "✘ DIVERGING"
-    algnCol  = aligned      ? color.lime   : color.orange
+trendTxt  = bullTrend    ? "▲ BULL"    : "▼ BEAR"
+trendCol  = bullTrend    ? color.lime   : color.red
+htfTxt    = htfBull      ? "▲ BULL"    : "▼ BEAR"
+htfCol    = htfBull      ? color.lime   : color.red
+momTxt    = hasMomentum  ? "✔ ACTIVE"  : "✘ FLAT"
+momCol    = hasMomentum  ? color.lime   : color.gray
+adxRound  = math.round(adxVal, 1)
+adxTxt    = trendStrong  ? "✔ " + str.tostring(adxRound) : "✘ " + str.tostring(adxRound)
+adxCol    = trendStrong  ? color.lime   : color.orange
+rsiRound  = math.round(rsiVal, 1)
+rsiTxt    = str.tostring(rsiRound)
+rsiCol    = (rsiVal > rsiOB or rsiVal < rsiOS) ? color.red : color.lime
+crossBars = bullTrend ? barsSinceBull : barsSinceBear
+crossTxt  = crossBars <= crossRecency
+             ? "✔ " + str.tostring(crossBars) + " bars ago"
+             : "✘ " + str.tostring(crossBars) + " bars ago"
+crossCol  = crossBars <= crossRecency ? color.lime : color.orange
+sessTxt   = inSession    ? "✔ OPEN"    : "✘ CLOSED"
+sessCol   = inSession    ? color.lime   : color.gray
+aligned   = bullTrend == htfBull
+algnTxt   = aligned      ? "✔ ALIGNED" : "✘ DIVERGING"
+algnCol   = aligned      ? color.lime   : color.orange
 
-    table.cell(infoTable, 0, 0, "EMA Scalp 7/17 Pro",
-               text_color=color.white, bgcolor=color.new(color.navy, 35), text_size=size.small)
-    table.cell(infoTable, 1, 0, "",
-               text_color=color.white, bgcolor=color.new(color.navy, 35))
+table.cell(infoTable, 0, 0, "EMA Scalp 7/17 Pro",
+           text_color=color.white, bgcolor=color.new(color.navy, 10), text_size=size.small)
+table.cell(infoTable, 1, 0, "",
+           text_color=color.white, bgcolor=color.new(color.navy, 10))
 
-    table.cell(infoTable, 0, 1, "LTF Trend",  text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 1, trendTxt,     text_color=trendCol,     text_size=size.tiny)
-    table.cell(infoTable, 0, 2, "HTF Trend",  text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 2, htfTxt,       text_color=htfCol,       text_size=size.tiny)
-    table.cell(infoTable, 0, 3, "Alignment",  text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 3, algnTxt,      text_color=algnCol,      text_size=size.tiny)
-    table.cell(infoTable, 0, 4, "Momentum",   text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 4, momTxt,       text_color=momCol,       text_size=size.tiny)
-    table.cell(infoTable, 0, 5, "ADX",        text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 5, adxTxt,       text_color=adxCol,       text_size=size.tiny)
-    table.cell(infoTable, 0, 6, "RSI",        text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 6, rsiTxt,       text_color=rsiCol,       text_size=size.tiny)
-    table.cell(infoTable, 0, 7, "EMA Cross",  text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 7, crossTxt,     text_color=crossCol,     text_size=size.tiny)
-    table.cell(infoTable, 0, 8, "Session",    text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 8, sessTxt,      text_color=sessCol,      text_size=size.tiny)
-    table.cell(infoTable, 0, 9, "RR Ratio",   text_color=color.silver, text_size=size.tiny)
-    table.cell(infoTable, 1, 9, "1:" + str.tostring(rrRatio),
-               text_color=color.yellow, text_size=size.tiny)
+table.cell(infoTable, 0, 1, "LTF Trend",  text_color=color.silver, text_size=size.tiny)
+table.cell(infoTable, 1, 1, trendTxt,     text_color=trendCol,     text_size=size.tiny)
+table.cell(infoTable, 0, 2, "HTF Trend",  text_color=color.silver, text_size=size.tiny)
+table.cell(infoTable, 1, 2, htfTxt,       text_color=htfCol,       text_size=size.tiny)
+table.cell(infoTable, 0, 3, "Alignment",  text_color=color.silver, text_size=size.tiny)
+table.cell(infoTable, 1, 3, algnTxt,      text_color=algnCol,      text_size=size.tiny)
+table.cell(infoTable, 0, 4, "Momentum",   text_color=color.silver, text_size=size.tiny)
+table.cell(infoTable, 1, 4, momTxt,       text_color=momCol,       text_size=size.tiny)
+table.cell(infoTable, 0, 5, "ADX",        text_color=color.silver, text_size=size.tiny)
+table.cell(infoTable, 1, 5, adxTxt,       text_color=adxCol,       text_size=size.tiny)
+table.cell(infoTable, 0, 6, "RSI",        text_color=color.silver, text_size=size.tiny)
+table.cell(infoTable, 1, 6, rsiTxt,       text_color=rsiCol,       text_size=size.tiny)
+table.cell(infoTable, 0, 7, "EMA Cross",  text_color=color.silver, text_size=size.tiny)
+table.cell(infoTable, 1, 7, crossTxt,     text_color=crossCol,     text_size=size.tiny)
+table.cell(infoTable, 0, 8, "Session",    text_color=color.silver, text_size=size.tiny)
+table.cell(infoTable, 1, 8, sessTxt,      text_color=sessCol,      text_size=size.tiny)
+table.cell(infoTable, 0, 9, "RR Ratio",   text_color=color.silver, text_size=size.tiny)
+table.cell(infoTable, 1, 9, "1:" + str.tostring(rrRatio),
+           text_color=color.yellow, text_size=size.tiny)
