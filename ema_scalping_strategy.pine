@@ -1,0 +1,236 @@
+//@version=6
+strategy(
+     title           = "EMA Scalping Strategy 7/17 [Trader DNA]",
+     shorttitle      = "EMA Scalp 7/17",
+     overlay         = true,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 1,
+     commission_type  = strategy.commission.percent,
+     commission_value = 0.05,
+     slippage         = 2
+ )
+
+// ═══════════════════════════════════════════════════════════════════
+//  INPUTS
+// ═══════════════════════════════════════════════════════════════════
+grpEma   = "EMA Settings"
+emaFastLen = input.int(7,  "Fast EMA", minval=1, group=grpEma)
+emaSlowLen = input.int(17, "Slow EMA", minval=1, group=grpEma)
+
+grpMom   = "Momentum Filter"
+slopeLen      = input.int(3, "Slope Lookback (bars)", minval=1, group=grpMom,
+                 tooltip="Number of bars used to measure EMA slope direction.")
+slopeThresh   = input.float(0.0002, "Min Slope Threshold (fraction of price)",
+                 minval=0.0, step=0.0001, group=grpMom,
+                 tooltip="Minimum rate-of-change of EMA7 per bar, relative to price, to qualify as a trend. Increase to be stricter.")
+
+grpPat   = "Candlestick Pattern Sensitivity"
+pinBarWickRatio  = input.float(0.55, "Pin Bar – Min Wick/Range Ratio",
+                  minval=0.1, maxval=0.95, step=0.05, group=grpPat,
+                  tooltip="The dominant wick must be at least this fraction of the total candle range.")
+bigCandleRatio   = input.float(0.60, "Big Candle – Min Body/Range Ratio",
+                  minval=0.1, maxval=0.99, step=0.05, group=grpPat,
+                  tooltip="Body must be at least this fraction of the range to count as a momentum candle.")
+engulfRatio      = input.float(1.00, "Engulfing – Min Body Ratio vs Prev Body",
+                  minval=0.5, step=0.05, group=grpPat,
+                  tooltip="Current body must be at least this multiple of the previous candle body.")
+
+grpRisk  = "Risk Management"
+rrRatio      = input.float(3.0, "Risk:Reward Ratio", minval=0.5, step=0.5, group=grpRisk)
+slBuffer     = input.float(0.1, "SL Buffer (% of candle range)", minval=0.0, step=0.05, group=grpRisk,
+               tooltip="Extra distance added to Stop-Loss beyond the candle high/low.")
+
+grpHTF   = "Higher Timeframe Filter"
+htfRes       = input.timeframe("60", "Higher TF (trend confirmation)", group=grpHTF,
+               tooltip="The strategy only trades in the direction of the EMA trend on this timeframe. Default: 1H.")
+
+grpVis   = "Visuals"
+showBg       = input.bool(true,  "Show Momentum Background", group=grpVis)
+showHTFCloud = input.bool(true,  "Show HTF Trend Cloud",     group=grpVis)
+
+// ═══════════════════════════════════════════════════════════════════
+//  EMA CALCULATIONS (current timeframe)
+// ═══════════════════════════════════════════════════════════════════
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+// Slope: normalized change over slopeLen bars relative to price
+emaFastSlope = (emaFast - emaFast[slopeLen]) / (close * slopeLen)
+emaSlowSlope = (emaSlow - emaSlow[slopeLen]) / (close * slopeLen)
+
+bullTrend   = emaFast > emaSlow
+bearTrend   = emaFast < emaSlow
+
+// Momentum = both EMAs moving strongly in the same direction
+bullMomentum = bullTrend and emaFastSlope >  slopeThresh and emaSlowSlope >  slopeThresh
+bearMomentum = bearTrend and emaFastSlope < -slopeThresh and emaSlowSlope < -slopeThresh
+hasMomentum  = bullMomentum or bearMomentum
+
+// ═══════════════════════════════════════════════════════════════════
+//  HIGHER TIMEFRAME FILTER
+// ═══════════════════════════════════════════════════════════════════
+htfEmaFast = request.security(syminfo.tickerid, htfRes, ta.ema(close, emaFastLen),
+              lookahead=barmerge.lookahead_off)
+htfEmaSlow = request.security(syminfo.tickerid, htfRes, ta.ema(close, emaSlowLen),
+              lookahead=barmerge.lookahead_off)
+
+htfBull = htfEmaFast > htfEmaSlow
+htfBear = htfEmaFast < htfEmaSlow
+
+// ═══════════════════════════════════════════════════════════════════
+//  CANDLESTICK METRICS
+// ═══════════════════════════════════════════════════════════════════
+candleBody  = math.abs(close - open)
+candleRange = high - low
+upperWick   = high - math.max(close, open)
+lowerWick   = math.min(close, open) - low
+
+prevBody    = math.abs(close[1] - open[1])
+bullCandle  = close > open
+bearCandle  = close < open
+
+// Avoid division by zero on doji / flat candles
+validRange  = candleRange > 0
+validBody   = prevBody    > 0
+
+// ─── 1. Pin Bar ──────────────────────────────────────────────────────────────
+// Bullish pin bar: long lower wick, small body near top → rejection from lows
+bullPinBar = validRange
+             and lowerWick >= pinBarWickRatio * candleRange
+             and upperWick  < (1 - pinBarWickRatio) * candleRange
+
+// Bearish pin bar: long upper wick, small body near bottom → rejection from highs
+bearPinBar = validRange
+             and upperWick  >= pinBarWickRatio * candleRange
+             and lowerWick   < (1 - pinBarWickRatio) * candleRange
+
+// ─── 2. Big Momentum Candle ───────────────────────────────────────────────────
+bullBigCandle = validRange and bullCandle and (candleBody / candleRange) >= bigCandleRatio
+bearBigCandle = validRange and bearCandle and (candleBody / candleRange) >= bigCandleRatio
+
+// ─── 3. Engulfing Candle ──────────────────────────────────────────────────────
+// Body of current candle fully engulfs body of previous candle
+bullEngulf = validBody
+             and bullCandle
+             and not bullCandle[1]                        // previous was bearish
+             and (candleBody / prevBody) >= engulfRatio
+             and close >= open[1]                         // body covers previous body
+             and open  <= close[1]
+
+bearEngulf = validBody
+             and bearCandle
+             and not bearCandle[1]                        // previous was bullish
+             and (candleBody / prevBody) >= engulfRatio
+             and close <= open[1]
+             and open  >= close[1]
+
+// ─── Aggregate pattern signals ────────────────────────────────────────────────
+bullPattern = bullPinBar or bullBigCandle or bullEngulf
+bearPattern = bearPinBar or bearBigCandle or bearEngulf
+
+// ═══════════════════════════════════════════════════════════════════
+//  ENTRY CONDITIONS
+//  All three filters must align:
+//    1. Current TF trend (EMA7 vs EMA17 + slope)
+//    2. HTF alignment
+//    3. Candlestick confirmation
+// ═══════════════════════════════════════════════════════════════════
+longCondition  = bullMomentum and htfBull and bullPattern and strategy.position_size == 0
+shortCondition = bearMomentum and htfBear and bearPattern and strategy.position_size == 0
+
+// ═══════════════════════════════════════════════════════════════════
+//  TRADE EXECUTION  (SL at candle extreme + buffer, TP at 1:RR)
+// ═══════════════════════════════════════════════════════════════════
+if longCondition
+    slDist  = (close - low)  * (1 + slBuffer / 100)
+    slPrice = close - slDist
+    tpPrice = close + slDist * rrRatio
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", from_entry="Long", stop=slPrice, limit=tpPrice)
+
+if shortCondition
+    slDist  = (high - close) * (1 + slBuffer / 100)
+    slPrice = close + slDist
+    tpPrice = close - slDist * rrRatio
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", from_entry="Short", stop=slPrice, limit=tpPrice)
+
+// ═══════════════════════════════════════════════════════════════════
+//  VISUALS
+// ═══════════════════════════════════════════════════════════════════
+
+// ── EMA lines ────────────────────────────────────────────────────────────────
+plot(emaFast, "EMA 7",  color=color.new(color.aqua,   0), linewidth=2)
+plot(emaSlow, "EMA 17", color=color.new(color.orange, 0), linewidth=2)
+
+// ── HTF EMA cloud ────────────────────────────────────────────────────────────
+p1 = plot(showHTFCloud ? htfEmaFast : na, "HTF EMA 7",
+          color=color.new(color.blue, 60), linewidth=1, style=plot.style_line)
+p2 = plot(showHTFCloud ? htfEmaSlow : na, "HTF EMA 17",
+          color=color.new(color.red,  60), linewidth=1, style=plot.style_line)
+fill(p1, p2,
+     color = htfBull ? color.new(color.green, 88) : color.new(color.red, 88),
+     title = "HTF Trend Cloud")
+
+// ── Momentum background ───────────────────────────────────────────────────────
+bgcolor(showBg and hasMomentum
+         ? (bullMomentum ? color.new(color.green, 93) : color.new(color.red, 93))
+         : na,
+        title="Momentum Background")
+
+// ── Signal markers ────────────────────────────────────────────────────────────
+plotshape(longCondition,  "Long Signal",  shape.triangleup,
+          location.belowbar, color=color.new(color.lime,  0), size=size.normal)
+plotshape(shortCondition, "Short Signal", shape.triangledown,
+          location.abovebar, color=color.new(color.red,   0), size=size.normal)
+
+// ── Pattern labels ────────────────────────────────────────────────────────────
+// Show which pattern triggered (visible on chart hover)
+patternLabel(cond, txt, loc, col) =>
+    if cond
+        label.new(bar_index, loc, txt,
+                  style=label.style_label_center,
+                  color=color.new(col, 70),
+                  textcolor=color.white, size=size.tiny)
+
+patternLabel(longCondition  and bullPinBar,    "PIN",     low  - candleRange * 0.5, color.green)
+patternLabel(longCondition  and bullBigCandle, "MOM",     low  - candleRange * 0.5, color.teal)
+patternLabel(longCondition  and bullEngulf,    "ENG",     low  - candleRange * 0.5, color.blue)
+patternLabel(shortCondition and bearPinBar,    "PIN",     high + candleRange * 0.5, color.red)
+patternLabel(shortCondition and bearBigCandle, "MOM",     high + candleRange * 0.5, color.maroon)
+patternLabel(shortCondition and bearEngulf,    "ENG",     high + candleRange * 0.5, color.purple)
+
+// ═══════════════════════════════════════════════════════════════════
+//  INFO TABLE  (top-right corner)
+// ═══════════════════════════════════════════════════════════════════
+var table infoTable = table.new(position.top_right, 2, 6,
+     bgcolor=color.new(color.black, 60), border_color=color.gray, border_width=1)
+
+if barstate.islast
+    trendTxt   = bullTrend    ? "▲ BULL"    : "▼ BEAR"
+    trendCol   = bullTrend    ? color.lime   : color.red
+    htfTxt     = htfBull      ? "▲ BULL"    : "▼ BEAR"
+    htfCol     = htfBull      ? color.lime   : color.red
+    momTxt     = hasMomentum  ? "✔ ACTIVE"  : "✘ FLAT"
+    momCol     = hasMomentum  ? color.lime   : color.gray
+    algnTxt    = (bullTrend == htfBull) ? "✔ ALIGNED" : "✘ DIVERGING"
+    algnCol    = (bullTrend == htfBull) ? color.lime   : color.orange
+
+    table.cell(infoTable, 0, 0, "EMA Scalping 7/17", text_color=color.white,
+               bgcolor=color.new(color.navy, 40), text_size=size.small)
+    table.cell(infoTable, 1, 0, "", bgcolor=color.new(color.navy, 40))
+
+    table.cell(infoTable, 0, 1, "Trend (5m)",  text_color=color.silver, text_size=size.tiny)
+    table.cell(infoTable, 1, 1, trendTxt,      text_color=trendCol,     text_size=size.tiny)
+
+    table.cell(infoTable, 0, 2, "HTF Trend",   text_color=color.silver, text_size=size.tiny)
+    table.cell(infoTable, 1, 2, htfTxt,        text_color=htfCol,       text_size=size.tiny)
+
+    table.cell(infoTable, 0, 3, "Momentum",    text_color=color.silver, text_size=size.tiny)
+    table.cell(infoTable, 1, 3, momTxt,        text_color=momCol,       text_size=size.tiny)
+
+    table.cell(infoTable, 0, 4, "Alignment",   text_color=color.silver, text_size=size.tiny)
+    table.cell(infoTable, 1, 4, algnTxt,       text_color=algnCol,      text_size=size.tiny)
+
+    table.cell(infoTable, 0, 5, "RR Ratio",    text_color=color.silver, text_size=size.tiny)
+    table.cell(infoTable, 1, 5, "1:" + str.tostring(rrRatio), text_color=color.yellow, text_size=size.tiny)
