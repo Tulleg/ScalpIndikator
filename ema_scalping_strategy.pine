@@ -1,86 +1,129 @@
 //@version=6
 strategy(
-     title                   = "EMA Scalping Strategy 7/17 [Optimized]",
-     shorttitle              = "EMA Scalp 7/17 Pro",
+     title                   = "BTC Intraday Strategy — EMA 21/55 + VWAP + Volume",
+     shorttitle              = "Intraday 21/55",
      overlay                 = true,
      process_orders_on_close  = true,
      default_qty_type        = strategy.percent_of_equity,
      default_qty_value       = 1,
      commission_type         = strategy.commission.percent,
      commission_value        = 0.05,
-     slippage                = 1
+     slippage                = 2
  )
 
 // ═══════════════════════════════════════════════════════════════════
-//  INPUTS
+//  WARUM DIESE KOMBINATION?
+//
+//  EMA 21/55  → Intraday-Standardpaar. EMA21 = ~5h, EMA55 = ~14h
+//               auf 15m. Crossover sind selten aber verlässlich.
+//
+//  VWAP       → Institutioneller Referenzpunkt. Market Maker
+//               kaufen unter VWAP, verkaufen darüber. Preis über
+//               VWAP + bullisches EMA = doppelte Bestätigung.
+//
+//  Volumen    → Unterscheidet echte Moves von Fakeouts. Der
+//               wichtigste fehlende Filter in EMA-Strategien.
+//
+//  Session    → Keine neuen Entries nach 19:00 UTC.
+//               Zwangsschluss aller Positionen um 21:00 UTC
+//               → kein Overnight-Rollover.
 // ═══════════════════════════════════════════════════════════════════
+
+// ─── INPUTS ─────────────────────────────────────────────────────────────────
+
 grpEma = "EMA Settings"
-emaFastLen = input.int(7,  "Fast EMA", minval=1, group=grpEma)
-emaSlowLen = input.int(17, "Slow EMA", minval=1, group=grpEma)
+emaFastLen = input.int(21, "Fast EMA",  minval=1, group=grpEma,
+             tooltip="EMA21 auf 15m ≈ 5h Preisentwicklung. Klassischer Intraday-Filter.")
+emaSlowLen = input.int(55, "Slow EMA",  minval=1, group=grpEma,
+             tooltip="EMA55 auf 15m ≈ 14h Preisentwicklung. Zeigt den Tages-Trend.")
 
-grpMom = "Momentum / ADX Filter"
-adxLen      = input.int(14,   "ADX Length",              minval=1,  group=grpMom)
-adxThresh   = input.float(20, "Min ADX (Trend Strength)", minval=0, step=1, group=grpMom,
-              tooltip="ADX ≥ 20 = trending market. Below 20 = choppy — no trades taken.")
-slopeThresh = input.float(0.0001, "Min EMA7 Slope (fraction of price)",
-              minval=0.0, step=0.00005, group=grpMom)
+grpVwap = "VWAP Filter"
+useVwap     = input.bool(true, "Require VWAP Alignment", group=grpVwap,
+              tooltip="Long nur wenn Preis über VWAP, Short nur wenn darunter.")
+vwapBand    = input.float(0.15, "VWAP Neutral Zone (% vom VWAP)", minval=0.0, step=0.05,
+              group=grpVwap,
+              tooltip="Zone um VWAP herum wo kein Trade erlaubt ist (zu unklar). 0 = deaktiviert.")
 
-grpCross = "Crossover Recency"
-crossRecency = input.int(8, "Max bars since EMA cross", minval=1, maxval=50, group=grpCross,
-               tooltip="Only enter if EMA7 crossed EMA17 within the last N bars. Prevents late entries at trend exhaustion.")
+grpMom = "Momentum & Trendstärke"
+adxLen      = input.int(14,    "ADX Länge",              minval=1,  group=grpMom)
+adxThresh   = input.float(20,  "Min ADX",                minval=0,  step=1,   group=grpMom,
+              tooltip="Unter 20 = Seitwärtsmarkt → kein Trade.")
+slopeThresh = input.float(0.0002, "Min EMA21 Slope",     minval=0,  step=0.00005, group=grpMom,
+              tooltip="Mindeststeilheit der EMA21 pro Bar (relativ zum Preis).")
+crossRecency = input.int(5, "Max Bars seit EMA-Kreuzung", minval=1, maxval=30, group=grpMom,
+               tooltip="Nur traden wenn EMA21/55-Kreuzung max. N Bars zurückliegt. 5 × 15m = 75 Min.")
+
+grpVol = "Volumen-Bestätigung"
+useVol      = input.bool(true, "Volumen-Filter aktiv", group=grpVol)
+volMult     = input.float(1.3, "Min Volumen vs. Ø20 (×)", minval=1.0, step=0.1, group=grpVol,
+              tooltip="Signal-Kerze muss 30% mehr Volumen haben als der 20-Bar-Durchschnitt.")
 
 grpRsi = "RSI Filter"
-rsiLen = input.int(14,   "RSI Length",                         minval=1,  group=grpRsi)
-rsiOB  = input.float(65, "Overbought ceiling (no Longs above)", minval=50, maxval=90, step=1, group=grpRsi)
-rsiOS  = input.float(35, "Oversold floor (no Shorts below)",    minval=10, maxval=50, step=1, group=grpRsi)
+rsiLen      = input.int(14,   "RSI Länge",               minval=1, group=grpRsi)
+rsiBullMin  = input.float(45, "Long: RSI Minimum",        minval=20, maxval=60, step=1, group=grpRsi,
+              tooltip="Kein Long wenn RSI unter diesem Wert — Trend noch nicht stark genug.")
+rsiBullMax  = input.float(72, "Long: RSI Maximum",        minval=60, maxval=90, step=1, group=grpRsi,
+              tooltip="Kein Long wenn RSI darüber — überkauft.")
+rsiBearMin  = input.float(28, "Short: RSI Minimum",       minval=10, maxval=40, step=1, group=grpRsi,
+              tooltip="Kein Short wenn RSI darunter — überverkauft.")
+rsiBearMax  = input.float(55, "Short: RSI Maximum",       minval=40, maxval=80, step=1, group=grpRsi,
+              tooltip="Kein Short wenn RSI über diesem Wert — Trend noch nicht bearish genug.")
 
-grpPat = "Candlestick Patterns"
-pinBarWickRatio = input.float(0.55, "Pin Bar – Min Wick/Range",     minval=0.1, maxval=0.95, step=0.05, group=grpPat)
-bigCandleRatio  = input.float(0.60, "Big Candle – Min Body/Range",  minval=0.1, maxval=0.99, step=0.05, group=grpPat)
-engulfRatio     = input.float(1.00, "Engulfing – Body vs Prev (×)", minval=0.5, step=0.05, group=grpPat)
+grpPat = "Kerzen-Muster"
+bigCandleRatio  = input.float(0.55, "Momentum-Kerze: Min Body/Range",  minval=0.1, step=0.05, group=grpPat)
+pinBarRatio     = input.float(0.55, "Pin Bar: Min Wick/Range",         minval=0.1, step=0.05, group=grpPat)
+engulfRatio     = input.float(0.95, "Engulfing: Body vs. vorh. Body ×",minval=0.5, step=0.05, group=grpPat)
 
-grpRisk = "Risk Management"
-atrLen    = input.int(14,   "ATR Length",          minval=1,  group=grpRisk)
-atrSlMult = input.float(1.5, "SL = ATR ×",         minval=0.1, step=0.1, group=grpRisk,
-            tooltip="Stop-Loss = entry ± (ATR × multiplier). ATR-based SL adapts to volatility — less premature stops than candle-based SL.")
-rrRatio   = input.float(2.0, "Risk:Reward Ratio",  minval=0.5, step=0.5, group=grpRisk,
-            tooltip="1:2 is more realistic for scalping than 1:3, resulting in a higher win rate.")
-useTrail  = input.bool(false, "Use Trailing Stop",              group=grpRisk,
-            tooltip="Trails the stop behind price by ATR × multiplier to lock in profits.")
-trailMult = input.float(1.0, "Trail Stop = ATR ×", minval=0.1, step=0.1, group=grpRisk)
+grpHTF = "Higher Timeframe (4h Bias)"
+htfRes   = input.timeframe("240", "HTF Timeframe", group=grpHTF,
+           tooltip="4h EMA 21/55 gibt den übergeordneten Tagestrend an.")
+useHtf   = input.bool(true, "HTF Filter aktiv", group=grpHTF)
 
-grpHTF = "Higher Timeframe Filter"
-htfRes = input.timeframe("60", "HTF (trend confirmation)", group=grpHTF,
-         tooltip="Only trade in the direction of the trend on this timeframe.")
+grpRisk = "Risiko-Management"
+atrLen      = input.int(14,   "ATR Länge",                 minval=1,  group=grpRisk)
+atrSlMult   = input.float(2.0, "Stop-Loss = ATR ×",        minval=0.5, step=0.1, group=grpRisk,
+              tooltip="Auf 15m ist ATR größer → SL braucht mehr Raum als auf 5m.")
+rrRatio     = input.float(2.5, "Risk:Reward Ratio",        minval=0.5, step=0.5, group=grpRisk)
+useTrail    = input.bool(true, "Trailing Stop aktiv",      group=grpRisk,
+              tooltip="Empfehlung: AN lassen. Sichert Gewinne bei starken Intraday-Trends.")
+trailMult   = input.float(1.5, "Trailing Stop = ATR ×",   minval=0.5, step=0.1, group=grpRisk)
 
-grpSession = "Session Filter"
-useSession = input.bool(false, "Limit to Active Sessions", group=grpSession,
-             tooltip="Avoids low-liquidity periods with more false signals.")
-sessionStr = input.string("0700-1600", "Session Window (UTC)",  group=grpSession,
-             tooltip="Default 07:00–16:00 UTC covers London open + NY overlap.")
+grpDD = "Drawdown-Schutz"
+useMaxDD    = input.bool(true,  "Tägliches Verlustlimit aktiv",   group=grpDD)
+maxDailyDD  = input.float(3.0,  "Max. Tagesverlust (%)",          minval=0.5, step=0.5, group=grpDD,
+              tooltip="Trading wird für den Rest des Tages gestoppt wenn dieser % Verlust erreicht wird.")
+
+grpSession = "Session & Tagesschluss"
+entryStopHour  = input.int(19, "Kein neuer Entry ab Stunde (UTC)", minval=0, maxval=23, group=grpSession,
+                 tooltip="Nach 19:00 UTC werden keine neuen Positionen mehr eröffnet.")
+forceCloseHour = input.int(21, "Zwangsschluss Stunde (UTC)",       minval=0, maxval=23, group=grpSession,
+                 tooltip="Alle offenen Positionen werden um diese Uhrzeit geschlossen. Kein Rollover.")
+sessionStart   = input.int(7,  "Session Start (UTC)",              minval=0, maxval=23, group=grpSession,
+                 tooltip="Vor dieser Stunde werden keine Trades geöffnet (asiatische Nacht).")
 
 grpVis = "Visuals"
-showBoxes    = input.bool(true,  "Show SL / TP Boxes",      group=grpVis)
-showBg       = input.bool(true,  "Show Momentum Background", group=grpVis)
-showHTFCloud = input.bool(true,  "Show HTF EMA Cloud",       group=grpVis)
+showBoxes    = input.bool(true,  "SL / TP Boxen anzeigen",    group=grpVis)
+showBg       = input.bool(true,  "Trend-Hintergrund anzeigen", group=grpVis)
+showHTFCloud = input.bool(true,  "4h EMA Cloud anzeigen",     group=grpVis)
+showVwap     = input.bool(true,  "VWAP anzeigen",             group=grpVis)
 
-// ═══════════════════════════════════════════════════════════════════
-//  EMA + SLOPE
-// ═══════════════════════════════════════════════════════════════════
+// ─── EMA ────────────────────────────────────────────────────────────────────
 emaFast = ta.ema(close, emaFastLen)
 emaSlow = ta.ema(close, emaSlowLen)
 
-bullTrend    = emaFast > emaSlow
-bearTrend    = emaFast < emaSlow
+bullTrend = emaFast > emaSlow
+bearTrend = emaFast < emaSlow
 
-emaFastSlope = (emaFast - emaFast[1]) / close
-bullMomentum = bullTrend and emaFastSlope >  slopeThresh
-bearMomentum = bearTrend and emaFastSlope < -slopeThresh
-hasMomentum  = bullMomentum or bearMomentum
+// Slope: Steigung über 2 aufeinanderfolgende Bars für Konsistenz (kein Einzelausreißer)
+slope1 = (emaFast - emaFast[1]) / close
+slope2 = (emaFast[1] - emaFast[2]) / close[1]
+bullSlope = slope1 >  slopeThresh and slope2 >  slopeThresh
+bearSlope = slope1 < -slopeThresh and slope2 < -slopeThresh
 
-// ═══════════════════════════════════════════════════════════════════
-//  CROSSOVER RECENCY  — avoid entering a trend that's already old
-// ═══════════════════════════════════════════════════════════════════
+bullMomentum = bullTrend and bullSlope
+bearMomentum = bearTrend and bearSlope
+
+// ─── CROSSOVER RECENCY ───────────────────────────────────────────────────────
 bullCross = ta.crossover(emaFast,  emaSlow)
 bearCross = ta.crossunder(emaFast, emaSlow)
 
@@ -92,42 +135,62 @@ barsSinceBear := bearCross ? 0 : barsSinceBear + 1
 recentBullCross = barsSinceBull <= crossRecency
 recentBearCross = barsSinceBear <= crossRecency
 
-// ═══════════════════════════════════════════════════════════════════
-//  ADX — trend strength (filters choppy / sideways markets)
-// ═══════════════════════════════════════════════════════════════════
+// ─── ADX ─────────────────────────────────────────────────────────────────────
 [_diPlus, _diMinus, adxVal] = ta.dmi(adxLen, adxLen)
 trendStrong = adxVal >= adxThresh
 
-// ═══════════════════════════════════════════════════════════════════
-//  RSI — avoid overbought longs and oversold shorts
-// ═══════════════════════════════════════════════════════════════════
-rsiVal    = ta.rsi(close, rsiLen)
-rsiBullOk = rsiVal < rsiOB
-rsiBearOk = rsiVal > rsiOS
-
-// ═══════════════════════════════════════════════════════════════════
-//  ATR — adaptive stop-loss sizing
-// ═══════════════════════════════════════════════════════════════════
+// ─── ATR ─────────────────────────────────────────────────────────────────────
 atr14 = ta.atr(atrLen)
 
-// ═══════════════════════════════════════════════════════════════════
-//  HIGHER TIMEFRAME FILTER
-// ═══════════════════════════════════════════════════════════════════
+// ─── RSI ─────────────────────────────────────────────────────────────────────
+rsiVal    = ta.rsi(close, rsiLen)
+rsiBullOk = rsiVal >= rsiBullMin and rsiVal <= rsiBullMax
+rsiBearOk = rsiVal >= rsiBearMin and rsiVal <= rsiBearMax
+
+// ─── VWAP ────────────────────────────────────────────────────────────────────
+vwapValue   = ta.vwap(hlc3)
+vwapNeutral = vwapBand / 100.0 * vwapValue
+aboveVwap   = close > vwapValue + vwapNeutral   // klar über VWAP
+belowVwap   = close < vwapValue - vwapNeutral   // klar unter VWAP
+vwapBullOk  = useVwap ? aboveVwap : true
+vwapBearOk  = useVwap ? belowVwap : true
+
+// ─── HTF ─────────────────────────────────────────────────────────────────────
 htfEmaFast = request.security(syminfo.tickerid, htfRes,
               ta.ema(close, emaFastLen), lookahead=barmerge.lookahead_off)
 htfEmaSlow = request.security(syminfo.tickerid, htfRes,
               ta.ema(close, emaSlowLen), lookahead=barmerge.lookahead_off)
-htfBull = htfEmaFast > htfEmaSlow
-htfBear = htfEmaFast < htfEmaSlow
+htfBull = useHtf ? htfEmaFast > htfEmaSlow : true
+htfBear = useHtf ? htfEmaFast < htfEmaSlow : true
 
-// ═══════════════════════════════════════════════════════════════════
-//  SESSION FILTER
-// ═══════════════════════════════════════════════════════════════════
-inSession = useSession ? not na(time(timeframe.period, sessionStr, "UTC")) : true
+// ─── VOLUMEN ─────────────────────────────────────────────────────────────────
+volAvg    = ta.sma(volume, 20)
+volFilter = useVol ? volume >= volAvg * volMult : true
 
-// ═══════════════════════════════════════════════════════════════════
-//  CANDLESTICK PATTERNS
-// ═══════════════════════════════════════════════════════════════════
+// ─── SESSION & ZWANGSSCHLUSS ─────────────────────────────────────────────────
+inEntryWindow = hour >= sessionStart and hour < entryStopHour
+forceClose    = hour == forceCloseHour and minute == 0
+
+// Zwangsschluss aller Positionen um die definierte Stunde
+if forceClose and strategy.position_size != 0
+    strategy.close_all("Tagesschluss")
+
+// ─── DRAWDOWN-SCHUTZ ─────────────────────────────────────────────────────────
+var float dayStartEquity = na
+var bool  tradingHalted  = false
+
+newDay = ta.change(dayofmonth) != 0 or (hour == sessionStart and minute < 15 and na(dayStartEquity))
+if newDay
+    dayStartEquity := strategy.equity
+    tradingHalted  := false
+
+dailyLossPct = na(dayStartEquity) or dayStartEquity == 0 ? 0.0
+               : (dayStartEquity - strategy.equity) / dayStartEquity * 100.0
+
+if useMaxDD and dailyLossPct >= maxDailyDD
+    tradingHalted := true
+
+// ─── KERZEN-MUSTER ───────────────────────────────────────────────────────────
 candleBody  = math.abs(close - open)
 candleRange = high - low
 upperWick   = high - math.max(close, open)
@@ -136,21 +199,21 @@ prevBody    = math.abs(close[1] - open[1])
 bullCandle  = close > open
 bearCandle  = close < open
 validRange  = candleRange > 0
-validBody   = prevBody    > 0
+validBody   = prevBody > 0
 
-// 1. Pin Bar
+// 1. Momentum-Kerze (großer Body = klare Richtungsentscheidung)
+bullMomCandle = validRange and bullCandle and (candleBody / candleRange) >= bigCandleRatio
+bearMomCandle = validRange and bearCandle and (candleBody / candleRange) >= bigCandleRatio
+
+// 2. Pin Bar (Rejection vom Niveau)
 bullPinBar = validRange
-             and lowerWick >= pinBarWickRatio * candleRange
-             and upperWick  < (1.0 - pinBarWickRatio) * candleRange
+             and lowerWick >= pinBarRatio * candleRange
+             and upperWick  < (1.0 - pinBarRatio) * candleRange
 bearPinBar = validRange
-             and upperWick  >= pinBarWickRatio * candleRange
-             and lowerWick   < (1.0 - pinBarWickRatio) * candleRange
+             and upperWick  >= pinBarRatio * candleRange
+             and lowerWick   < (1.0 - pinBarRatio) * candleRange
 
-// 2. Big Momentum Candle
-bullBigCandle = validRange and bullCandle and (candleBody / candleRange) >= bigCandleRatio
-bearBigCandle = validRange and bearCandle and (candleBody / candleRange) >= bigCandleRatio
-
-// 3. Engulfing
+// 3. Engulfing (vollständige Übernahme der Vorgängerkerze)
 bullEngulf = validBody and bullCandle and not bullCandle[1]
              and (candleBody / prevBody) >= engulfRatio
              and close >= open[1] and open <= close[1]
@@ -158,32 +221,40 @@ bearEngulf = validBody and bearCandle and not bearCandle[1]
              and (candleBody / prevBody) >= engulfRatio
              and close <= open[1] and open >= close[1]
 
-bullPattern = bullPinBar or bullBigCandle or bullEngulf
-bearPattern = bearPinBar or bearBigCandle or bearEngulf
+bullPattern = bullMomCandle or bullPinBar or bullEngulf
+bearPattern = bearMomCandle or bearPinBar or bearEngulf
 
-// ═══════════════════════════════════════════════════════════════════
-//  ENTRY CONDITIONS  — all 6 filters must pass
-// ═══════════════════════════════════════════════════════════════════
+// ─── ENTRY-BEDINGUNGEN ───────────────────────────────────────────────────────
+// Alle Filter müssen gleichzeitig grün sein:
+//   Trend   → EMA21 > EMA55 + konsistenter Slope
+//   Kreuzung → max. 5 Bars alt (75 Min auf 15m)
+//   Stärke  → ADX ≥ 20 (echter Trend, kein Seitwärts)
+//   VWAP    → klar über/unter VWAP (institutioneller Bias)
+//   HTF     → 4h EMA in gleicher Richtung
+//   RSI     → im Trending-Bereich (nicht extrem)
+//   Volumen → Signal-Bar hat erhöhtes Volumen
+//   Session → innerhalb des Entry-Fensters, kein Halt
 noPosition     = strategy.position_size == 0
-longCondition  = bullMomentum and recentBullCross and trendStrong
-                 and htfBull and rsiBullOk and bullPattern and inSession and noPosition
-shortCondition = bearMomentum and recentBearCross and trendStrong
-                 and htfBear and rsiBearOk and bearPattern and inSession and noPosition
+canTrade       = inEntryWindow and not tradingHalted and not forceClose
 
-// ═══════════════════════════════════════════════════════════════════
-//  TRADE STATE  (persists across bars)
-// ═══════════════════════════════════════════════════════════════════
+longCondition  = bullMomentum and recentBullCross and trendStrong
+                 and vwapBullOk and htfBull and rsiBullOk
+                 and volFilter and bullPattern
+                 and canTrade and noPosition
+
+shortCondition = bearMomentum and recentBearCross and trendStrong
+                 and vwapBearOk and htfBear and rsiBearOk
+                 and volFilter and bearPattern
+                 and canTrade and noPosition
+
+// ─── TRADE-STATE ─────────────────────────────────────────────────────────────
 var float activeSL  = na
 var float activeTP  = na
 var box   slBox     = na
 var box   tpBox     = na
 var line  entryLine = na
 
-// ═══════════════════════════════════════════════════════════════════
-//  TRAILING STOP UPDATE  (runs every bar while in position)
-//  Calls strategy.exit each bar to move the stop — overrides the
-//  initial exit placed at entry, which is correct behaviour.
-// ═══════════════════════════════════════════════════════════════════
+// Trailing Stop — läuft jeden Bar während Position offen ist
 if strategy.position_size > 0
     if useTrail
         newTS    = close - trailMult * atr14
@@ -196,7 +267,7 @@ if strategy.position_size < 0
         activeSL := math.min(nz(activeSL, newTS), newTS)
     strategy.exit("Short Exit", "Short", stop=activeSL, limit=activeTP)
 
-// ─── Cleanup when position is closed ────────────────────────────────────────
+// Cleanup nach Positionsschluss
 positionClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
 if positionClosed
     activeSL := na
@@ -205,9 +276,7 @@ if positionClosed
     box.delete(tpBox)
     line.delete(entryLine)
 
-// ═══════════════════════════════════════════════════════════════════
-//  ENTRIES  + BOX DRAW
-// ═══════════════════════════════════════════════════════════════════
+// ─── ENTRIES + BOX ───────────────────────────────────────────────────────────
 if longCondition
     slDist   = atr14 * atrSlMult
     activeSL := close - slDist
@@ -218,16 +287,16 @@ if longCondition
         line.delete(entryLine)
         slBox     := box.new(bar_index, close, bar_index + 1, activeSL,
                              extend=extend.right,
-                             border_color=color.new(color.red,   20), border_width=1,
-                             bgcolor     =color.new(color.red,   82))
+                             border_color=color.new(color.red,   15), border_width=1,
+                             bgcolor     =color.new(color.red,   80))
         tpBox     := box.new(bar_index, close, bar_index + 1, activeTP,
                              extend=extend.right,
-                             border_color=color.new(color.green, 20), border_width=1,
-                             bgcolor     =color.new(color.green, 82))
+                             border_color=color.new(color.green, 15), border_width=1,
+                             bgcolor     =color.new(color.green, 80))
         entryLine := line.new(bar_index, close, bar_index + 1, close,
                               extend=extend.right,
-                              color =color.new(color.white, 30), width=1,
-                              style =line.style_dashed)
+                              color=color.new(color.white, 25), width=1,
+                              style=line.style_dashed)
     strategy.entry("Long", strategy.long)
     strategy.exit("Long Exit", "Long", stop=activeSL, limit=activeTP)
 
@@ -241,154 +310,144 @@ if shortCondition
         line.delete(entryLine)
         slBox     := box.new(bar_index, close, bar_index + 1, activeSL,
                              extend=extend.right,
-                             border_color=color.new(color.red,   20), border_width=1,
-                             bgcolor     =color.new(color.red,   82))
+                             border_color=color.new(color.red,   15), border_width=1,
+                             bgcolor     =color.new(color.red,   80))
         tpBox     := box.new(bar_index, close, bar_index + 1, activeTP,
                              extend=extend.right,
-                             border_color=color.new(color.green, 20), border_width=1,
-                             bgcolor     =color.new(color.green, 82))
+                             border_color=color.new(color.green, 15), border_width=1,
+                             bgcolor     =color.new(color.green, 80))
         entryLine := line.new(bar_index, close, bar_index + 1, close,
                               extend=extend.right,
-                              color =color.new(color.white, 30), width=1,
-                              style =line.style_dashed)
+                              color=color.new(color.white, 25), width=1,
+                              style=line.style_dashed)
     strategy.entry("Short", strategy.short)
     strategy.exit("Short Exit", "Short", stop=activeSL, limit=activeTP)
 
-// ═══════════════════════════════════════════════════════════════════
-//  VISUALS
-// ═══════════════════════════════════════════════════════════════════
+// ─── VISUALS ─────────────────────────────────────────────────────────────────
 
-// EMA lines
-plot(emaFast, "EMA 7",  color=color.new(color.aqua,   0), linewidth=2)
-plot(emaSlow, "EMA 17", color=color.new(color.orange, 0), linewidth=2)
+// EMA-Linien
+plot(emaFast, "EMA 21", color=color.new(color.aqua,   0), linewidth=2)
+plot(emaSlow, "EMA 55", color=color.new(color.orange, 0), linewidth=2)
 
-// HTF cloud
-p1 = plot(showHTFCloud ? htfEmaFast : na, "HTF EMA 7",
+// VWAP
+plot(showVwap ? vwapValue : na, "VWAP",
+     color=color.new(color.yellow, 0), linewidth=2, style=plot.style_stepline)
+
+// HTF 4h Cloud
+p1 = plot(showHTFCloud ? htfEmaFast : na, "HTF EMA 21",
           color=color.new(color.blue, 55), linewidth=1)
-p2 = plot(showHTFCloud ? htfEmaSlow : na, "HTF EMA 17",
+p2 = plot(showHTFCloud ? htfEmaSlow : na, "HTF EMA 55",
           color=color.new(color.red,  55), linewidth=1)
 fill(p1, p2,
      color = htfBull ? color.new(color.green, 88) : color.new(color.red, 88),
-     title = "HTF Cloud")
+     title = "4h Trend Cloud")
 
-// Momentum background
-bgcolor(showBg and hasMomentum
-        ? (bullMomentum ? color.new(color.green, 93) : color.new(color.red, 93))
+// Hintergrundfarbe: grün/rot wenn Trend aktiv, grau wenn kein Momentum
+bgcolor(showBg
+        ? (not trendStrong
+           ? color.new(color.gray, 96)
+           : bullMomentum
+             ? color.new(color.green, 93)
+             : bearMomentum
+               ? color.new(color.red, 93)
+               : na)
         : na,
-        title="Momentum BG")
+        title="Trend BG")
 
-// Signal arrows
+// Signal-Pfeile
 plotshape(longCondition,  "Long",  shape.triangleup,
           location.belowbar, color=color.new(color.lime, 0), size=size.normal)
 plotshape(shortCondition, "Short", shape.triangledown,
           location.abovebar, color=color.new(color.red,  0), size=size.normal)
 
-// Pattern labels  (function only creates objects, does not modify global vars — CE10088 safe)
-patternLabel(cond, txt, yLoc, col) =>
-    if cond
-        label.new(bar_index, yLoc, txt,
-                  style=label.style_label_center,
-                  color=color.new(col, 65),
-                  textcolor=color.white,
-                  size=size.tiny)
+// Halt-Markierung wenn Drawdown-Limit erreicht
+plotshape(tradingHalted and not tradingHalted[1], "Trading gestoppt",
+          shape.xcross, location.abovebar, color=color.new(color.orange, 0),
+          size=size.small, title="DD-Limit erreicht")
 
-patternLabel(longCondition  and bullPinBar,    "PIN", low  - candleRange * 0.6, color.green)
-patternLabel(longCondition  and bullBigCandle, "MOM", low  - candleRange * 0.6, color.teal)
-patternLabel(longCondition  and bullEngulf,    "ENG", low  - candleRange * 0.6, color.blue)
-patternLabel(shortCondition and bearPinBar,    "PIN", high + candleRange * 0.6, color.red)
-patternLabel(shortCondition and bearBigCandle, "MOM", high + candleRange * 0.6, color.maroon)
-patternLabel(shortCondition and bearEngulf,    "ENG", high + candleRange * 0.6, color.purple)
+// ─── ALERTS ──────────────────────────────────────────────────────────────────
+patternName(isMom, isPin, isEng) =>
+    isMom ? "Momentum" : isPin ? "Pin Bar" : isEng ? "Engulfing" : "Signal"
 
-// ═══════════════════════════════════════════════════════════════════
-//  ALERTS
-//  alert()          → feuert automatisch wenn Bedingung eintritt
-//  alertcondition() → erscheint im TradingView "Alert erstellen"-Dialog
-// ═══════════════════════════════════════════════════════════════════
+longPat  = patternName(bullMomCandle, bullPinBar, bullEngulf)
+shortPat = patternName(bearMomCandle, bearPinBar, bearEngulf)
 
-// Muster-Text für die Alert-Nachricht
-patternTxt(isPinBar, isBigCandle, isEngulf) =>
-    isPinBar ? "Pin Bar" : isBigCandle ? "Momentum Candle" : isEngulf ? "Engulfing" : "Signal"
-
-longPatternTxt  = patternTxt(bullPinBar,  bullBigCandle,  bullEngulf)
-shortPatternTxt = patternTxt(bearPinBar,  bearBigCandle,  bearEngulf)
-
-// Automatische Alerts — feuern beim Bar-Close sobald Signal aktiv
-// (alert.freq_once_per_bar_close passt zu process_orders_on_close=true)
 if longCondition
-    alert("LONG Signal ▲  |  " + syminfo.ticker + " " + timeframe.period + "m" +
-          "  |  Muster: " + longPatternTxt +
-          "  |  ADX: " + str.tostring(math.round(adxVal, 1)) +
-          "  |  RSI: " + str.tostring(math.round(rsiVal, 1)) +
-          "  |  SL: " + str.tostring(math.round(close - atr14 * atrSlMult, 5)) +
-          "  |  TP: " + str.tostring(math.round(close + atr14 * atrSlMult * rrRatio, 5)),
+    alert("LONG ▲  " + syminfo.ticker + " 15m" +
+          "  |  Muster: " + longPat +
+          "  |  ADX: "   + str.tostring(math.round(adxVal, 1)) +
+          "  |  RSI: "   + str.tostring(math.round(rsiVal, 1)) +
+          "  |  VWAP: "  + (aboveVwap ? "✔ drüber" : "✘ darunter") +
+          "  |  SL: "    + str.tostring(math.round(close - atr14 * atrSlMult, 2)) +
+          "  |  TP: "    + str.tostring(math.round(close + atr14 * atrSlMult * rrRatio, 2)),
           alert.freq_once_per_bar_close)
 
 if shortCondition
-    alert("SHORT Signal ▼  |  " + syminfo.ticker + " " + timeframe.period + "m" +
-          "  |  Muster: " + shortPatternTxt +
-          "  |  ADX: " + str.tostring(math.round(adxVal, 1)) +
-          "  |  RSI: " + str.tostring(math.round(rsiVal, 1)) +
-          "  |  SL: " + str.tostring(math.round(close + atr14 * atrSlMult, 5)) +
-          "  |  TP: " + str.tostring(math.round(close - atr14 * atrSlMult * rrRatio, 5)),
+    alert("SHORT ▼  " + syminfo.ticker + " 15m" +
+          "  |  Muster: " + shortPat +
+          "  |  ADX: "   + str.tostring(math.round(adxVal, 1)) +
+          "  |  RSI: "   + str.tostring(math.round(rsiVal, 1)) +
+          "  |  VWAP: "  + (belowVwap ? "✔ drunter" : "✘ drüber") +
+          "  |  SL: "    + str.tostring(math.round(close + atr14 * atrSlMult, 2)) +
+          "  |  TP: "    + str.tostring(math.round(close - atr14 * atrSlMult * rrRatio, 2)),
           alert.freq_once_per_bar_close)
 
-// Benannte Alert-Bedingungen — erscheinen im "Alert erstellen"-Dialog
-// unter: Bedingung → Strategie auswählen → Condition auswählen
-alertcondition(longCondition,  "Long Signal  ▲", "LONG Signal — EMA Scalp 7/17")
-alertcondition(shortCondition, "Short Signal ▼", "SHORT Signal — EMA Scalp 7/17")
-alertcondition(longCondition or shortCondition, "Beliebiges Signal", "Signal — EMA Scalp 7/17")
+alertcondition(longCondition,  "Long Signal  ▲", "LONG — BTC Intraday 21/55")
+alertcondition(shortCondition, "Short Signal ▼", "SHORT — BTC Intraday 21/55")
+alertcondition(longCondition or shortCondition, "Beliebiges Signal", "Signal — BTC Intraday 21/55")
 
-// ═══════════════════════════════════════════════════════════════════
-//  INFO TABLE  — updated every bar (barstate.islast unreliable in
-//  strategies with process_orders_on_close = true)
-// ═══════════════════════════════════════════════════════════════════
-var table infoTable = table.new(position.top_right, 2, 10,
-     bgcolor=color.new(color.black, 20), border_color=color.new(color.gray, 30), border_width=1)
+// ─── INFO-TABELLE ─────────────────────────────────────────────────────────────
+var table t = table.new(position.top_right, 2, 11,
+     bgcolor=color.new(color.black, 20),
+     border_color=color.new(color.gray, 30), border_width=1)
 
-trendTxt  = bullTrend    ? "▲ BULL"    : "▼ BEAR"
-trendCol  = bullTrend    ? color.lime   : color.red
-htfTxt    = htfBull      ? "▲ BULL"    : "▼ BEAR"
-htfCol    = htfBull      ? color.lime   : color.red
-momTxt    = hasMomentum  ? "✔ ACTIVE"  : "✘ FLAT"
-momCol    = hasMomentum  ? color.lime   : color.gray
-adxRound  = math.round(adxVal, 1)
-adxTxt    = trendStrong  ? "✔ " + str.tostring(adxRound) : "✘ " + str.tostring(adxRound)
-adxCol    = trendStrong  ? color.lime   : color.orange
-rsiRound  = math.round(rsiVal, 1)
-rsiTxt    = str.tostring(rsiRound)
-rsiCol    = (rsiVal > rsiOB or rsiVal < rsiOS) ? color.red : color.lime
-crossBars = bullTrend ? barsSinceBull : barsSinceBear
-crossTxt  = crossBars <= crossRecency
-             ? "✔ " + str.tostring(crossBars) + " bars ago"
-             : "✘ " + str.tostring(crossBars) + " bars ago"
-crossCol  = crossBars <= crossRecency ? color.lime : color.orange
-sessTxt   = inSession    ? "✔ OPEN"    : "✘ CLOSED"
-sessCol   = inSession    ? color.lime   : color.gray
-aligned   = bullTrend == htfBull
-algnTxt   = aligned      ? "✔ ALIGNED" : "✘ DIVERGING"
-algnCol   = aligned      ? color.lime   : color.orange
+trendTxt  = bullTrend     ? "▲ BULL"       : "▼ BEAR"
+trendCol  = bullTrend     ? color.lime      : color.red
+htfTxt    = htfBull       ? "▲ BULL (4h)"  : "▼ BEAR (4h)"
+htfCol    = htfBull       ? color.lime      : color.red
+adxTxt    = trendStrong   ? "✔ " + str.tostring(math.round(adxVal, 1))
+                          : "✘ " + str.tostring(math.round(adxVal, 1))
+adxCol    = trendStrong   ? color.lime      : color.orange
+rsiTxt    = str.tostring(math.round(rsiVal, 1))
+rsiCol    = (rsiVal > rsiBullMax or rsiVal < rsiBearMin) ? color.red : color.lime
+vwapTxt   = aboveVwap     ? "✔ über VWAP"
+            : belowVwap   ? "✔ unter VWAP" : "✘ VWAP-Zone"
+vwapCol   = (aboveVwap or belowVwap) ? color.lime : color.orange
+volTxt    = volFilter     ? "✔ " + str.tostring(math.round(volume / volAvg, 2)) + "× Ø"
+                          : "✘ " + str.tostring(math.round(volume / volAvg, 2)) + "× Ø"
+volCol    = volFilter     ? color.lime      : color.orange
+sessTxt   = canTrade      ? "✔ Entry OK"   : tradingHalted ? "✘ DD-Limit" : "✘ Außerhalb"
+sessCol   = canTrade      ? color.lime      : color.red
+crossB    = bullTrend ? barsSinceBull : barsSinceBear
+crossTxt  = crossB <= crossRecency
+            ? "✔ vor " + str.tostring(crossB) + " Bars"
+            : "✘ vor " + str.tostring(crossB) + " Bars"
+crossCol  = crossB <= crossRecency ? color.lime : color.orange
+ddTxt     = str.tostring(math.round(dailyLossPct, 2)) + "% / " + str.tostring(maxDailyDD) + "%"
+ddCol     = tradingHalted ? color.red : dailyLossPct > maxDailyDD * 0.7 ? color.orange : color.lime
 
-table.cell(infoTable, 0, 0, "EMA Scalp 7/17 Pro",
+table.cell(t, 0, 0,  "BTC Intraday 21/55",
            text_color=color.white, bgcolor=color.new(color.navy, 10), text_size=size.small)
-table.cell(infoTable, 1, 0, "",
-           text_color=color.white, bgcolor=color.new(color.navy, 10))
+table.cell(t, 1, 0,  "", bgcolor=color.new(color.navy, 10))
 
-table.cell(infoTable, 0, 1, "LTF Trend",  text_color=color.silver, text_size=size.tiny)
-table.cell(infoTable, 1, 1, trendTxt,     text_color=trendCol,     text_size=size.tiny)
-table.cell(infoTable, 0, 2, "HTF Trend",  text_color=color.silver, text_size=size.tiny)
-table.cell(infoTable, 1, 2, htfTxt,       text_color=htfCol,       text_size=size.tiny)
-table.cell(infoTable, 0, 3, "Alignment",  text_color=color.silver, text_size=size.tiny)
-table.cell(infoTable, 1, 3, algnTxt,      text_color=algnCol,      text_size=size.tiny)
-table.cell(infoTable, 0, 4, "Momentum",   text_color=color.silver, text_size=size.tiny)
-table.cell(infoTable, 1, 4, momTxt,       text_color=momCol,       text_size=size.tiny)
-table.cell(infoTable, 0, 5, "ADX",        text_color=color.silver, text_size=size.tiny)
-table.cell(infoTable, 1, 5, adxTxt,       text_color=adxCol,       text_size=size.tiny)
-table.cell(infoTable, 0, 6, "RSI",        text_color=color.silver, text_size=size.tiny)
-table.cell(infoTable, 1, 6, rsiTxt,       text_color=rsiCol,       text_size=size.tiny)
-table.cell(infoTable, 0, 7, "EMA Cross",  text_color=color.silver, text_size=size.tiny)
-table.cell(infoTable, 1, 7, crossTxt,     text_color=crossCol,     text_size=size.tiny)
-table.cell(infoTable, 0, 8, "Session",    text_color=color.silver, text_size=size.tiny)
-table.cell(infoTable, 1, 8, sessTxt,      text_color=sessCol,      text_size=size.tiny)
-table.cell(infoTable, 0, 9, "RR Ratio",   text_color=color.silver, text_size=size.tiny)
-table.cell(infoTable, 1, 9, "1:" + str.tostring(rrRatio),
+table.cell(t, 0, 1,  "Trend (15m)", text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 1,  trendTxt,      text_color=trendCol,     text_size=size.tiny)
+table.cell(t, 0, 2,  "Trend (4h)",  text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 2,  htfTxt,        text_color=htfCol,       text_size=size.tiny)
+table.cell(t, 0, 3,  "ADX",         text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 3,  adxTxt,        text_color=adxCol,       text_size=size.tiny)
+table.cell(t, 0, 4,  "VWAP",        text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 4,  vwapTxt,       text_color=vwapCol,      text_size=size.tiny)
+table.cell(t, 0, 5,  "RSI",         text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 5,  rsiTxt,        text_color=rsiCol,       text_size=size.tiny)
+table.cell(t, 0, 6,  "Volumen",     text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 6,  volTxt,        text_color=volCol,       text_size=size.tiny)
+table.cell(t, 0, 7,  "EMA Kreuzung",text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 7,  crossTxt,      text_color=crossCol,     text_size=size.tiny)
+table.cell(t, 0, 8,  "Session",     text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 8,  sessTxt,       text_color=sessCol,      text_size=size.tiny)
+table.cell(t, 0, 9,  "Tagesverlust",text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 9,  ddTxt,         text_color=ddCol,        text_size=size.tiny)
+table.cell(t, 0, 10, "RR / Schluss",text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 10, "1:" + str.tostring(rrRatio) + " | " + str.tostring(forceCloseHour) + ":00 UTC",
            text_color=color.yellow, text_size=size.tiny)
