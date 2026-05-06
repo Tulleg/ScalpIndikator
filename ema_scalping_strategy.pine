@@ -300,6 +300,45 @@ patternLabel(shortCondition and bearBigCandle, "MOM", high + candleRange * 0.6, 
 patternLabel(shortCondition and bearEngulf,    "ENG", high + candleRange * 0.6, color.purple)
 
 // ═══════════════════════════════════════════════════════════════════
+//  ALERTS
+//  alert()          → feuert automatisch wenn Bedingung eintritt
+//  alertcondition() → erscheint im TradingView "Alert erstellen"-Dialog
+// ═══════════════════════════════════════════════════════════════════
+
+// Muster-Text für die Alert-Nachricht
+patternTxt(isPinBar, isBigCandle, isEngulf) =>
+    isPinBar ? "Pin Bar" : isBigCandle ? "Momentum Candle" : isEngulf ? "Engulfing" : "Signal"
+
+longPatternTxt  = patternTxt(bullPinBar,  bullBigCandle,  bullEngulf)
+shortPatternTxt = patternTxt(bearPinBar,  bearBigCandle,  bearEngulf)
+
+// Automatische Alerts — feuern beim Bar-Close sobald Signal aktiv
+// (alert.freq_once_per_bar_close passt zu process_orders_on_close=true)
+if longCondition
+    alert("LONG Signal ▲  |  " + syminfo.ticker + " " + timeframe.period + "m" +
+          "  |  Muster: " + longPatternTxt +
+          "  |  ADX: " + str.tostring(math.round(adxVal, 1)) +
+          "  |  RSI: " + str.tostring(math.round(rsiVal, 1)) +
+          "  |  SL: " + str.tostring(math.round(close - atr14 * atrSlMult, 5)) +
+          "  |  TP: " + str.tostring(math.round(close + atr14 * atrSlMult * rrRatio, 5)),
+          alert.freq_once_per_bar_close)
+
+if shortCondition
+    alert("SHORT Signal ▼  |  " + syminfo.ticker + " " + timeframe.period + "m" +
+          "  |  Muster: " + shortPatternTxt +
+          "  |  ADX: " + str.tostring(math.round(adxVal, 1)) +
+          "  |  RSI: " + str.tostring(math.round(rsiVal, 1)) +
+          "  |  SL: " + str.tostring(math.round(close + atr14 * atrSlMult, 5)) +
+          "  |  TP: " + str.tostring(math.round(close - atr14 * atrSlMult * rrRatio, 5)),
+          alert.freq_once_per_bar_close)
+
+// Benannte Alert-Bedingungen — erscheinen im "Alert erstellen"-Dialog
+// unter: Bedingung → Strategie auswählen → Condition auswählen
+alertcondition(longCondition,  "Long Signal  ▲", "LONG Signal — EMA Scalp 7/17")
+alertcondition(shortCondition, "Short Signal ▼", "SHORT Signal — EMA Scalp 7/17")
+alertcondition(longCondition or shortCondition, "Beliebiges Signal", "Signal — EMA Scalp 7/17")
+
+// ═══════════════════════════════════════════════════════════════════
 //  INFO TABLE  — updated every bar (barstate.islast unreliable in
 //  strategies with process_orders_on_close = true)
 // ═══════════════════════════════════════════════════════════════════
