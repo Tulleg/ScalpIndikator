@@ -1,82 +1,87 @@
 //@version=6
 indicator(
-     title     = "BTC Intraday Signals — VWAP + EMA 21/55",
-     shorttitle = "VWAP Intraday",
-     overlay    = true
- )
+    title      = "BTC CVD Flow — 15m Intraday",
+    shorttitle = "CVD Flow 15m",
+    overlay    = true
+)
 
 // ═══════════════════════════════════════════════════════════════════
 //  KONZEPT
 //
-//  Entry-Trigger: VWAP-Kreuzung mit Volumen
-//    → Preis kreuzt VWAP von unten nach oben + Volumen-Spike = Long
-//    → Preis kreuzt VWAP von oben nach unten + Volumen-Spike = Short
-//    Der erste Test des VWAPs nach einer Trendbewegung ist der stärkste.
+//  Entry-Trigger: VWAP-Pullback + Order Flow Bestätigung (CVD)
+//    → Preis zieht zum VWAP zurück (Fair Value) von oben = Long
+//    → Preis zieht zum VWAP zurück (Fair Value) von unten = Short
 //
-//  Warum VWAP als Trigger?
-//    VWAP ist der faire Tagespreis gewichtet nach Volumen.
-//    Wenn der Preis mit starkem Volumen über den VWAP bricht,
-//    dreht sich der Tages-Bias — das ist ein messbares, wiederholbares
-//    institutionelles Muster.
+//  Warum CVD + Pullback statt Crossover?
+//    Ein VWAP-Kreuzungspunkt ist ein Umkehrsignal — dort dreht der
+//    Trend gerade erst. Der stärkste Entry entsteht beim ersten
+//    Rückzug zum VWAP nach einer Trendbewegung (institutionelles
+//    Re-Test-Muster). CVD zeigt, ob Kaufdruck/Verkaufsdruck
+//    weiterhin aktiv ist, ohne Tick-Daten zu benötigen.
 //
-//  Pflicht-Confluence (alle müssen grün sein):
-//    EMA 21/55  → Trendrichtung bestätigt (kein Gegentrend-Entry)
-//    ADX ≥ 20   → Echter Trend, kein Seitwärts
-//    Volume     → Volumen-Spike am Kreuzungs-Bar (kein Fake)
-//    RSI        → Im Trending-Bereich
-//    4h EMA     → Übergeordneter Tages-Bias stimmt überein
+//  Confluence (nicht-widersprechend):
+//    CVD       → Order Flow Richtung bestätigt
+//    EMA 21/55 → Trendrichtung auf 15m
+//    1h EMA    → Übergeordneter Stunden-Bias
+//    RSI       → Extreme ausschließen (kein OB-Long, kein OS-Short)
+//    Session   → London (07-11) oder NY (13-17) UTC
 //
-//  Take-Profit: VWAP ± 1σ Band (natürliche Zielzone)
-//  Stop-Loss:   ATR × 1.5 unter/über dem Entry
+//  Take-Profit: VWAP ±1σ Band
+//  Stop-Loss:   ATR × 1.2 unter/über Entry
 // ═══════════════════════════════════════════════════════════════════
 
 // ─── INPUTS ──────────────────────────────────────────────────────────────────
 
+grpCvd = "Order Flow (CVD)"
+cvdLen      = input.int(50, "CVD Fenster (Bars)",     minval=10, group=grpCvd,
+              tooltip="Rollierendes Fenster für den CVD. Größer = träger, aber stabiler.")
+cvdLookback = input.int(5,  "CVD Trend-Lookback",     minval=1,  group=grpCvd,
+              tooltip="CVD muss seit X Bars in Signalrichtung laufen.")
+
 grpVwap = "VWAP"
-vwapStdLen  = input.int(20,   "Std.-Abweichung Länge",      minval=5,  group=grpVwap,
-              tooltip="Periode für die Berechnung der VWAP-Bänder (±1σ, ±2σ).")
-vwapVolMult = input.float(1.5,"Volumen-Spike am Cross (×Ø)", minval=1.0, step=0.1, group=grpVwap,
-              tooltip="VWAP-Kreuzungs-Bar muss dieses Vielfache des 20-Bar-Volumens haben.")
+vwapStdLen    = input.int(20,    "Std.-Abweichung Länge",      minval=5,   group=grpVwap)
+vwapProximity = input.float(0.20,"Pullback-Zone (% zum VWAP)", minval=0.05, maxval=1.0, step=0.05, group=grpVwap,
+               tooltip="Preis muss innerhalb dieser % Distanz zum VWAP liegen.")
 
 grpEma = "EMA Trend-Filter"
 emaFastLen = input.int(21, "Fast EMA", minval=1, group=grpEma,
-             tooltip="EMA21 auf 15m ≈ 5h Geschichte. Muss in Signal-Richtung zeigen.")
+             tooltip="EMA21 auf 15m ≈ 5h Geschichte.")
 emaSlowLen = input.int(55, "Slow EMA", minval=1, group=grpEma,
              tooltip="EMA55 auf 15m ≈ 14h Geschichte.")
-slopeThresh = input.float(0.0002, "Min EMA21 Slope (×Preis)", minval=0, step=0.00005, group=grpEma,
-              tooltip="EMA21 muss in Signalrichtung steigen/fallen — kein flacher Trend.")
-
-grpMom = "Trendstärke"
-adxLen    = input.int(14,   "ADX Länge", minval=1, group=grpMom)
-adxThresh = input.float(20, "Min ADX",  minval=0, step=1,  group=grpMom,
-            tooltip="Unter 20 = Seitwärtsmarkt → kein Signal.")
 
 grpRsi = "RSI"
-rsiLen     = input.int(14,   "RSI Länge",       minval=1, group=grpRsi)
-rsiBullMin = input.float(45, "Long  – RSI min.", minval=20, maxval=60, step=1, group=grpRsi)
-rsiBullMax = input.float(72, "Long  – RSI max.", minval=60, maxval=90, step=1, group=grpRsi)
-rsiBearMin = input.float(28, "Short – RSI min.", minval=10, maxval=40, step=1, group=grpRsi)
-rsiBearMax = input.float(55, "Short – RSI max.", minval=40, maxval=80, step=1, group=grpRsi)
+rsiLen = input.int(14,    "RSI Länge",                         minval=1, group=grpRsi)
+rsiOB  = input.float(75,  "Überkauft — Long ausschließen",     minval=60, maxval=90, step=1, group=grpRsi)
+rsiOS  = input.float(25,  "Überverkauft — Short ausschließen", minval=10, maxval=40, step=1, group=grpRsi)
 
-grpHTF = "4h Bias-Filter"
-htfRes = input.timeframe("240", "HTF Timeframe", group=grpHTF)
-useHtf = input.bool(true, "4h Filter aktiv", group=grpHTF)
+grpHTF = "1h Bias-Filter"
+htfRes = input.timeframe("60", "HTF Timeframe", group=grpHTF)
+useHtf = input.bool(true, "1h Filter aktiv", group=grpHTF)
 
 grpRisk = "SL / TP"
-atrLen    = input.int(14,   "ATR Länge",        minval=1,   group=grpRisk)
-atrSlMult = input.float(1.5, "Stop-Loss = ATR ×",minval=0.5, step=0.1, group=grpRisk,
-            tooltip="SL enger als bei reinem EMA-Ansatz, weil VWAP-Level klar definiert.")
+atrLen    = input.int(14,    "ATR Länge",         minval=1,   group=grpRisk)
+atrSlMult = input.float(1.2, "Stop-Loss = ATR ×", minval=0.5, step=0.1, group=grpRisk,
+            tooltip="Engerer SL als früher — VWAP als klar definiertes Level.")
 
-grpSession = "Session"
-sessionStart  = input.int(7,  "Signale ab (UTC)",           minval=0, maxval=23, group=grpSession)
-entryStopHour = input.int(19, "Kein neues Signal ab (UTC)", minval=0, maxval=23, group=grpSession)
-eodHour       = input.int(21, "Tagesschluss-Hinweis (UTC)", minval=0, maxval=23, group=grpSession)
+grpSession = "Session (UTC)"
+useLondon = input.bool(true, "London  07–11 UTC", group=grpSession)
+useNY     = input.bool(true, "New York 13–17 UTC", group=grpSession)
 
 grpVis = "Visuals"
-showBands    = input.bool(true,  "VWAP-Bänder anzeigen (±1σ, ±2σ)", group=grpVis)
-showBoxes    = input.bool(true,  "SL / TP Boxen anzeigen",           group=grpVis)
-showBg       = input.bool(true,  "Trend-Hintergrund anzeigen",        group=grpVis)
-showHTFCloud = input.bool(true,  "4h EMA Cloud anzeigen",            group=grpVis)
+showBands    = input.bool(true, "VWAP-Bänder anzeigen (±1σ, ±2σ)", group=grpVis)
+showBoxes    = input.bool(true, "SL / TP Boxen anzeigen",           group=grpVis)
+showBg       = input.bool(true, "Session/Trend-Hintergrund",         group=grpVis)
+showHTFCloud = input.bool(true, "1h EMA Cloud anzeigen",             group=grpVis)
+showCvdBars  = input.bool(true, "CVD Bar-Farbe anzeigen",            group=grpVis)
+showZone     = input.bool(true, "Pullback-Zone hervorheben",         group=grpVis)
+
+// ─── CVD (APPROXIMATION) ─────────────────────────────────────────────────────
+// Positives Volumen bei bullischem Bar, negatives bei bearischem
+deltaVol = volume * (close >= open ? 1.0 : -1.0)
+cvd      = math.sum(deltaVol, cvdLen)
+cvdSlope = cvd - cvd[cvdLookback]
+cvdBull  = cvdSlope > 0
+cvdBear  = cvdSlope < 0
 
 // ─── VWAP + BÄNDER ───────────────────────────────────────────────────────────
 vwapValue = ta.vwap(hlc3)
@@ -87,39 +92,26 @@ vwapLower1 = vwapValue - 1.0 * vwapStdev
 vwapUpper2 = vwapValue + 2.0 * vwapStdev
 vwapLower2 = vwapValue - 2.0 * vwapStdev
 
-// VWAP-Kreuzung: Preis wechselt von einer Seite zur anderen
-vwapBullCross = ta.crossover(close,  vwapValue)   // von unten nach oben
-vwapBearCross = ta.crossunder(close, vwapValue)   // von oben nach unten
-
-// ─── VOLUMEN ─────────────────────────────────────────────────────────────────
-volAvg       = ta.sma(volume, 20)
-volSpikeVwap = volume >= volAvg * vwapVolMult     // Volumen-Spike am VWAP-Cross
+// Pullback-Zone: Preis nähert sich VWAP als Fair Value
+proxFactor   = vwapProximity / 100.0
+nearVwapBull = close > vwapValue and close < vwapValue * (1.0 + proxFactor)
+nearVwapBear = close < vwapValue and close > vwapValue * (1.0 - proxFactor)
 
 // ─── EMA TREND-FILTER ────────────────────────────────────────────────────────
-emaFast = ta.ema(close, emaFastLen)
-emaSlow = ta.ema(close, emaSlowLen)
-
+emaFast   = ta.ema(close, emaFastLen)
+emaSlow   = ta.ema(close, emaSlowLen)
 bullTrend = emaFast > emaSlow
 bearTrend = emaFast < emaSlow
 
-slope1    = (emaFast - emaFast[1]) / close
-slope2    = (emaFast[1] - emaFast[2]) / close[1]
-bullSlope = slope1 >  slopeThresh and slope2 >  slopeThresh
-bearSlope = slope1 < -slopeThresh and slope2 < -slopeThresh
-
-// ─── ADX ─────────────────────────────────────────────────────────────────────
-[_diPlus, _diMinus, adxVal] = ta.dmi(adxLen, adxLen)
-trendStrong = adxVal >= adxThresh
-
 // ─── RSI ─────────────────────────────────────────────────────────────────────
 rsiVal    = ta.rsi(close, rsiLen)
-rsiBullOk = rsiVal >= rsiBullMin and rsiVal <= rsiBullMax
-rsiBearOk = rsiVal >= rsiBearMin and rsiVal <= rsiBearMax
+rsiBullOk = rsiVal < rsiOB
+rsiBearOk = rsiVal > rsiOS
 
 // ─── ATR ─────────────────────────────────────────────────────────────────────
 atr14 = ta.atr(atrLen)
 
-// ─── HTF 4h ──────────────────────────────────────────────────────────────────
+// ─── HTF 1h ──────────────────────────────────────────────────────────────────
 htfEmaFast = request.security(syminfo.tickerid, htfRes,
               ta.ema(close, emaFastLen), lookahead=barmerge.lookahead_off)
 htfEmaSlow = request.security(syminfo.tickerid, htfRes,
@@ -128,71 +120,64 @@ htfBull = useHtf ? htfEmaFast > htfEmaSlow : true
 htfBear = useHtf ? htfEmaFast < htfEmaSlow : true
 
 // ─── SESSION ─────────────────────────────────────────────────────────────────
-inEntryWindow = hour >= sessionStart and hour < entryStopHour
+londonOpen = hour >= 7  and hour < 11
+nyOpen     = hour >= 13 and hour < 17
+inSession  = (useLondon and londonOpen) or (useNY and nyOpen)
 
 // ─── SIGNAL-BEDINGUNGEN ──────────────────────────────────────────────────────
-// Long: VWAP-Kreuzung nach oben + alle Confluence-Filter grün
-longCondition  = vwapBullCross
-                 and volSpikeVwap
-                 and bullTrend and bullSlope
-                 and trendStrong
-                 and rsiBullOk
+// Long: Pullback zum VWAP von oben + CVD bestätigt Käufer + Trend + Session
+longCondition  = nearVwapBull
+                 and cvdBull
+                 and bullTrend
                  and htfBull
-                 and inEntryWindow
+                 and rsiBullOk
+                 and inSession
 
-// Short: VWAP-Kreuzung nach unten + alle Confluence-Filter grün
-shortCondition = vwapBearCross
-                 and volSpikeVwap
-                 and bearTrend and bearSlope
-                 and trendStrong
-                 and rsiBearOk
+// Short: Pullback zum VWAP von unten + CVD bestätigt Verkäufer + Trend + Session
+shortCondition = nearVwapBear
+                 and cvdBear
+                 and bearTrend
                  and htfBear
-                 and inEntryWindow
+                 and rsiBearOk
+                 and inSession
 
 // ─── BOX-STATE ───────────────────────────────────────────────────────────────
 var box   slBox     = na
 var box   tpBox     = na
 var line  entryLine = na
-var line  tpLine1   = na
 var float sigSL     = na
 var float sigTP     = na
 var bool  inLong    = false
 var bool  inShort   = false
 
-// Boxen schließen wenn SL oder TP getroffen
 if inLong and not na(sigSL)
     if low <= sigSL or high >= sigTP
         box.delete(slBox)
         box.delete(tpBox)
         line.delete(entryLine)
-        line.delete(tpLine1)
-        inLong  := false
-        sigSL   := na
-        sigTP   := na
+        inLong := false
+        sigSL  := na
+        sigTP  := na
 
 if inShort and not na(sigSL)
     if high >= sigSL or low <= sigTP
         box.delete(slBox)
         box.delete(tpBox)
         line.delete(entryLine)
-        line.delete(tpLine1)
         inShort := false
         sigSL   := na
         sigTP   := na
 
 // ─── SIGNALE + BOXEN ─────────────────────────────────────────────────────────
-// TP = nächstes VWAP-Band (natürliche Zielzone)
-if longCondition
-    slDist  = atr14 * atrSlMult
-    sigSL  := close - slDist
-    sigTP  := vwapUpper1                     // TP = VWAP + 1σ
+if longCondition and not inLong
+    sigSL  := close - atr14 * atrSlMult
+    sigTP  := vwapUpper1
     inLong  := true
     inShort := false
     if showBoxes
         box.delete(slBox)
         box.delete(tpBox)
         line.delete(entryLine)
-        line.delete(tpLine1)
         slBox     := box.new(bar_index, close, bar_index + 1, sigSL,
                              extend=extend.right,
                              border_color=color.new(color.red,   15), border_width=1,
@@ -206,17 +191,15 @@ if longCondition
                               color=color.new(color.white, 25), width=1,
                               style=line.style_dashed)
 
-if shortCondition
-    slDist  = atr14 * atrSlMult
-    sigSL  := close + slDist
-    sigTP  := vwapLower1                     // TP = VWAP - 1σ
+if shortCondition and not inShort
+    sigSL  := close + atr14 * atrSlMult
+    sigTP  := vwapLower1
     inShort := true
     inLong  := false
     if showBoxes
         box.delete(slBox)
         box.delete(tpBox)
         line.delete(entryLine)
-        line.delete(tpLine1)
         slBox     := box.new(bar_index, close, bar_index + 1, sigSL,
                              extend=extend.right,
                              border_color=color.new(color.red,   15), border_width=1,
@@ -232,44 +215,62 @@ if shortCondition
 
 // ─── VISUALS ─────────────────────────────────────────────────────────────────
 
+// CVD Bar-Farbe (grün = Kaufdruck, rot = Verkaufsdruck)
+barcolor(showCvdBars
+         ? (cvdBull ? color.new(color.lime, 55) : color.new(color.red, 55))
+         : na,
+         title="CVD Bar Color")
+
 // VWAP-Linie
 plot(vwapValue, "VWAP", color=color.new(color.yellow, 0), linewidth=2,
      style=plot.style_stepline)
 
+// Pullback-Zone (Highlight wenn Preis in der Zone)
+p_bullH = plot(showZone and nearVwapBull ? vwapValue * (1.0 + proxFactor) : na,
+               display=display.none, editable=false)
+p_bullL = plot(showZone and nearVwapBull ? vwapValue                      : na,
+               display=display.none, editable=false)
+p_bearH = plot(showZone and nearVwapBear ? vwapValue                      : na,
+               display=display.none, editable=false)
+p_bearL = plot(showZone and nearVwapBear ? vwapValue * (1.0 - proxFactor) : na,
+               display=display.none, editable=false)
+fill(p_bullH, p_bullL, color=color.new(color.lime, 80), title="Bull Pullback Zone")
+fill(p_bearH, p_bearL, color=color.new(color.red,  80), title="Bear Pullback Zone")
+
 // VWAP-Bänder ±1σ und ±2σ
 plot(showBands ? vwapUpper1 : na, "VWAP +1σ",
-     color=color.new(color.green, 40), linewidth=1, style=plot.style_line)
+     color=color.new(color.green, 40), linewidth=1)
 plot(showBands ? vwapLower1 : na, "VWAP -1σ",
-     color=color.new(color.red,   40), linewidth=1, style=plot.style_line)
+     color=color.new(color.red,   40), linewidth=1)
 plot(showBands ? vwapUpper2 : na, "VWAP +2σ",
-     color=color.new(color.green, 65), linewidth=1, style=plot.style_line)
+     color=color.new(color.green, 65), linewidth=1)
 plot(showBands ? vwapLower2 : na, "VWAP -2σ",
-     color=color.new(color.red,   65), linewidth=1, style=plot.style_line)
+     color=color.new(color.red,   65), linewidth=1)
 
 // EMA-Linien
 plot(emaFast, "EMA 21", color=color.new(color.aqua,   0), linewidth=2)
 plot(emaSlow, "EMA 55", color=color.new(color.orange, 0), linewidth=2)
 
-// 4h Cloud
-p1 = plot(showHTFCloud ? htfEmaFast : na, "4h EMA 21",
+// 1h Cloud
+p1 = plot(showHTFCloud ? htfEmaFast : na, "1h EMA 21",
           color=color.new(color.blue, 55), linewidth=1)
-p2 = plot(showHTFCloud ? htfEmaSlow : na, "4h EMA 55",
+p2 = plot(showHTFCloud ? htfEmaSlow : na, "1h EMA 55",
           color=color.new(color.red,  55), linewidth=1)
 fill(p1, p2,
      color = htfBull ? color.new(color.green, 88) : color.new(color.red, 88),
-     title = "4h Cloud")
+     title = "1h Cloud")
 
-// Trend-Hintergrund
+// Session/Trend-Hintergrund
 bgcolor(showBg
-        ? (not trendStrong
-           ? color.new(color.gray,  96)
-           : bullTrend and bullSlope
-             ? color.new(color.green, 93)
-             : bearTrend and bearSlope
-               ? color.new(color.red,   93)
+        ? (not inSession
+           ? color.new(color.gray,  97)
+           : bullTrend
+             ? color.new(color.green, 94)
+             : bearTrend
+               ? color.new(color.red, 94)
                : na)
         : na,
-        title="Trend BG")
+        title="Session/Trend BG")
 
 // Signal-Pfeile
 plotshape(longCondition,  "LONG",  shape.triangleup,
@@ -278,80 +279,76 @@ plotshape(shortCondition, "SHORT", shape.triangledown,
           location.abovebar, color=color.new(color.red,  0), size=size.normal)
 
 // ─── ALERTS ──────────────────────────────────────────────────────────────────
-if longCondition
+if longCondition and not inLong
     alert("LONG ▲  " + syminfo.ticker + " 15m" +
-          "  |  VWAP-Cross ↑ mit Volumen" +
-          "  |  ADX: "   + str.tostring(math.round(adxVal,  1)) +
-          "  |  RSI: "   + str.tostring(math.round(rsiVal,  1)) +
-          "  |  SL: "    + str.tostring(math.round(close - atr14 * atrSlMult, 2)) +
-          "  |  TP: "    + str.tostring(math.round(vwapUpper1, 2)) + " (VWAP +1σ)",
+          "  |  VWAP-Pullback + CVD Bull" +
+          "  |  RSI: " + str.tostring(math.round(rsiVal, 1)) +
+          "  |  SL: "  + str.tostring(math.round(close - atr14 * atrSlMult, 2)) +
+          "  |  TP: "  + str.tostring(math.round(vwapUpper1, 2)) + " (VWAP +1σ)",
           alert.freq_once_per_bar_close)
 
-if shortCondition
+if shortCondition and not inShort
     alert("SHORT ▼  " + syminfo.ticker + " 15m" +
-          "  |  VWAP-Cross ↓ mit Volumen" +
-          "  |  ADX: "   + str.tostring(math.round(adxVal,  1)) +
-          "  |  RSI: "   + str.tostring(math.round(rsiVal,  1)) +
-          "  |  SL: "    + str.tostring(math.round(close + atr14 * atrSlMult, 2)) +
-          "  |  TP: "    + str.tostring(math.round(vwapLower1, 2)) + " (VWAP -1σ)",
+          "  |  VWAP-Pullback + CVD Bear" +
+          "  |  RSI: " + str.tostring(math.round(rsiVal, 1)) +
+          "  |  SL: "  + str.tostring(math.round(close + atr14 * atrSlMult, 2)) +
+          "  |  TP: "  + str.tostring(math.round(vwapLower1, 2)) + " (VWAP -1σ)",
           alert.freq_once_per_bar_close)
 
-alertcondition(longCondition,  "Long Signal  ▲", "LONG — VWAP Intraday BTC")
-alertcondition(shortCondition, "Short Signal ▼", "SHORT — VWAP Intraday BTC")
-alertcondition(longCondition or shortCondition, "Beliebiges Signal", "Signal — VWAP Intraday BTC")
+alertcondition(longCondition,  "Long Signal  ▲", "LONG — CVD Flow 15m BTC")
+alertcondition(shortCondition, "Short Signal ▼", "SHORT — CVD Flow 15m BTC")
+alertcondition(longCondition or shortCondition, "Beliebiges Signal", "Signal — CVD Flow 15m BTC")
 
 // ─── INFO-TABELLE ─────────────────────────────────────────────────────────────
 var table t = table.new(position.top_right, 2, 10,
      bgcolor=color.new(color.black, 20),
      border_color=color.new(color.gray, 30), border_width=1)
 
-vwapPosTxt = close > vwapUpper1 ? "über +1σ"
+cvdTxt = (cvdBull ? "▲ " : "▼ ") + str.tostring(math.round(cvd / 1000, 1)) + "k"
+cvdCol = cvdBull ? color.lime : color.red
+
+vwapPosTxt = nearVwapBull ? "Pullback-Zone BULL"
+             : nearVwapBear ? "Pullback-Zone BEAR"
              : close > vwapValue ? "über VWAP"
-             : close > vwapLower1 ? "unter VWAP"
-             : "unter -1σ"
+             : "unter VWAP"
 vwapPosCol = close > vwapValue ? color.lime : color.red
 
-trendTxt   = bullTrend and bullSlope ? "▲ BULL + Slope"
-             : bearTrend and bearSlope ? "▼ BEAR + Slope"
-             : bullTrend ? "▲ BULL (flach)" : "▼ BEAR (flach)"
-trendCol   = (bullTrend and bullSlope) or (bearTrend and bearSlope) ? color.lime : color.orange
+trendTxt = bullTrend ? "▲ BULL EMA21>55" : "▼ BEAR EMA21<55"
+trendCol = bullTrend ? color.lime : color.red
 
-htfTxt     = htfBull     ? "▲ BULL (4h)"  : "▼ BEAR (4h)"
-htfCol     = htfBull     ? color.lime      : color.red
-adxTxt     = trendStrong ? "✔ " + str.tostring(math.round(adxVal, 1))
-                         : "✘ " + str.tostring(math.round(adxVal, 1))
-adxCol     = trendStrong ? color.lime : color.orange
-rsiTxt     = str.tostring(math.round(rsiVal, 1))
-rsiCol     = (rsiVal > rsiBullMax or rsiVal < rsiBearMin) ? color.red : color.lime
-volRatio   = math.round(volume / volAvg, 2)
-volTxt     = volSpikeVwap ? "✔ " + str.tostring(volRatio) + "× Ø"
-                          : str.tostring(volRatio) + "× Ø"
-volCol     = volSpikeVwap ? color.lime : color.gray
-sessTxt    = inEntryWindow ? "✔ Entry-Fenster" : "✘ außerhalb"
-sessCol    = inEntryWindow ? color.lime : color.gray
-bandTxt    = "+1σ " + str.tostring(math.round(vwapUpper1, 1)) +
-             "  |  -1σ " + str.tostring(math.round(vwapLower1, 1))
+htfTxt = htfBull ? "▲ BULL (1h)" : "▼ BEAR (1h)"
+htfCol = htfBull ? color.lime    : color.red
 
-table.cell(t, 0, 0, "VWAP Intraday 21/55",
+rsiTxt = str.tostring(math.round(rsiVal, 1))
+rsiCol = rsiVal >= rsiOB ? color.red : rsiVal <= rsiOS ? color.orange : color.lime
+
+sessTxt = londonOpen ? "✔ London 07-11" : nyOpen ? "✔ New York 13-17" : "✘ außerhalb"
+sessCol = inSession  ? color.lime : color.gray
+
+sigTxt = longCondition ? "▲ LONG" : shortCondition ? "▼ SHORT" : "— kein Signal"
+sigCol = longCondition ? color.lime : shortCondition ? color.red : color.silver
+
+table.cell(t, 0, 0, "CVD Flow 15m",
            text_color=color.white, bgcolor=color.new(color.navy, 10), text_size=size.small)
-table.cell(t, 1, 0, "", bgcolor=color.new(color.navy, 10))
+table.cell(t, 1, 0, "",            bgcolor=color.new(color.navy, 10))
 
-table.cell(t, 0, 1, "VWAP Position", text_color=color.silver, text_size=size.tiny)
-table.cell(t, 1, 1, vwapPosTxt,      text_color=vwapPosCol,   text_size=size.tiny)
-table.cell(t, 0, 2, "VWAP Bänder",   text_color=color.silver, text_size=size.tiny)
-table.cell(t, 1, 2, bandTxt,         text_color=color.gray,   text_size=size.tiny)
-table.cell(t, 0, 3, "EMA Trend",     text_color=color.silver, text_size=size.tiny)
-table.cell(t, 1, 3, trendTxt,        text_color=trendCol,     text_size=size.tiny)
-table.cell(t, 0, 4, "4h Bias",       text_color=color.silver, text_size=size.tiny)
-table.cell(t, 1, 4, htfTxt,          text_color=htfCol,       text_size=size.tiny)
-table.cell(t, 0, 5, "ADX",           text_color=color.silver, text_size=size.tiny)
-table.cell(t, 1, 5, adxTxt,          text_color=adxCol,       text_size=size.tiny)
-table.cell(t, 0, 6, "RSI",           text_color=color.silver, text_size=size.tiny)
-table.cell(t, 1, 6, rsiTxt,          text_color=rsiCol,       text_size=size.tiny)
-table.cell(t, 0, 7, "Volumen",       text_color=color.silver, text_size=size.tiny)
-table.cell(t, 1, 7, volTxt,          text_color=volCol,       text_size=size.tiny)
-table.cell(t, 0, 8, "Session",       text_color=color.silver, text_size=size.tiny)
-table.cell(t, 1, 8, sessTxt,         text_color=sessCol,      text_size=size.tiny)
-table.cell(t, 0, 9, "Schluss ~",     text_color=color.silver, text_size=size.tiny)
-table.cell(t, 1, 9, str.tostring(eodHour) + ":00 UTC  |  SL ×" + str.tostring(atrSlMult),
+table.cell(t, 0, 1, "Order Flow CVD", text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 1, cvdTxt,           text_color=cvdCol,       text_size=size.tiny)
+table.cell(t, 0, 2, "VWAP Position",  text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 2, vwapPosTxt,       text_color=vwapPosCol,   text_size=size.tiny)
+table.cell(t, 0, 3, "EMA Trend",      text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 3, trendTxt,         text_color=trendCol,     text_size=size.tiny)
+table.cell(t, 0, 4, "1h Bias",        text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 4, htfTxt,           text_color=htfCol,       text_size=size.tiny)
+table.cell(t, 0, 5, "RSI",            text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 5, rsiTxt,           text_color=rsiCol,       text_size=size.tiny)
+table.cell(t, 0, 6, "Session",        text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 6, sessTxt,          text_color=sessCol,      text_size=size.tiny)
+table.cell(t, 0, 7, "Signal",         text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 7, sigTxt,           text_color=sigCol,       text_size=size.tiny)
+table.cell(t, 0, 8, "SL",             text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 8, str.tostring(atrSlMult) + " × ATR",
+           text_color=color.yellow, text_size=size.tiny)
+table.cell(t, 0, 9, "TP",             text_color=color.silver, text_size=size.tiny)
+table.cell(t, 1, 9, "VWAP +1σ / -1σ",
            text_color=color.yellow, text_size=size.tiny)
