@@ -40,7 +40,7 @@ cvdLookback = input.int(5,  "CVD Trend-Lookback",     minval=1,  group=grpCvd,
 
 grpVwap = "VWAP"
 vwapStdLen    = input.int(20,    "Std.-Abweichung Länge",      minval=5,   group=grpVwap)
-vwapProximity = input.float(0.20,"Pullback-Zone (% zum VWAP)", minval=0.05, maxval=1.0, step=0.05, group=grpVwap,
+vwapProximity = input.float(0.50,"Pullback-Zone (% zum VWAP)", minval=0.05, maxval=2.0, step=0.05, group=grpVwap,
                tooltip="Preis muss innerhalb dieser % Distanz zum VWAP liegen.")
 
 grpEma = "EMA Trend-Filter"
@@ -97,6 +97,9 @@ proxFactor   = vwapProximity / 100.0
 nearVwapBull = close > vwapValue and close < vwapValue * (1.0 + proxFactor)
 nearVwapBear = close < vwapValue and close > vwapValue * (1.0 - proxFactor)
 
+// VWAP-Kreuzung als zusätzlicher Short-Trigger (fängt schnelle Breakdowns)
+vwapBearCross = ta.crossunder(close, vwapValue)
+
 // ─── EMA TREND-FILTER ────────────────────────────────────────────────────────
 emaFast   = ta.ema(close, emaFastLen)
 emaSlow   = ta.ema(close, emaSlowLen)
@@ -133,8 +136,9 @@ longCondition  = nearVwapBull
                  and rsiBullOk
                  and inSession
 
-// Short: Pullback zum VWAP von unten + CVD bestätigt Verkäufer + Trend + Session
-shortCondition = nearVwapBear
+// Short: Pullback zum VWAP von unten ODER direkter Breakdown durch VWAP
+// + CVD bestätigt Verkäufer + Trend + Session
+shortCondition = (nearVwapBear or vwapBearCross)
                  and cvdBear
                  and bearTrend
                  and htfBear
@@ -309,6 +313,7 @@ cvdCol = cvdBull ? color.lime : color.red
 
 vwapPosTxt = nearVwapBull ? "Pullback-Zone BULL"
              : nearVwapBear ? "Pullback-Zone BEAR"
+             : vwapBearCross ? "VWAP-Breakdown"
              : close > vwapValue ? "über VWAP"
              : "unter VWAP"
 vwapPosCol = close > vwapValue ? color.lime : color.red
